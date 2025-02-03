@@ -1,12 +1,16 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <glm/ext/matrix_transform.hpp>
 #include <limits>
 #include <map>
 #include <optional>
 #include <set>
 #include <vector>
 #include <vulkan/vulkan.h>
+
+#define VMA_IMPLEMENTATION
+#include <vk_mem_alloc.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -30,7 +34,7 @@ class Window
 {
 	public:
 		GLFWwindow *window;
-		bool framebufferResized = false;
+		bool		framebufferResized = false;
 
 		void setup(int width, int height, std::string name)
 		{
@@ -44,7 +48,7 @@ class Window
 			glfwSetWindowUserPointer(window, this);
 			glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
 		}
-		
+
 		static void framebufferResizeCallback(GLFWwindow *window, int width, int height)
 		{
 			((Window *)glfwGetWindowUserPointer(window))->framebufferResized = true;
@@ -53,7 +57,6 @@ class Window
 
 class Instance
 {
-
 };
 
 class HelloTriangleApplication
@@ -88,7 +91,12 @@ class HelloTriangleApplication
 		std::vector<VkFramebuffer> swapChainFramebuffers;
 		VkCommandPool			   commandPool;
 		VkBuffer				   vertexBuffer;
-		VkDeviceMemory			   vertexBufferMemory;
+		VmaAllocation			   vertexAllocation;
+
+		VkBuffer	   squareBuffer;
+		VkDeviceMemory squareMemory;
+
+		VmaAllocator vmaAllocator;
 
 		VkDescriptorPool			 descriptorPool;
 		std::vector<VkDescriptorSet> descriptorSets;
@@ -252,7 +260,7 @@ class HelloTriangleApplication
 			appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
 			appInfo.pEngineName		   = "No Engine";
 			appInfo.engineVersion	   = VK_MAKE_VERSION(1, 0, 0);
-			appInfo.apiVersion		   = VK_API_VERSION_1_0;
+			appInfo.apiVersion		   = VK_API_VERSION_1_3;
 
 			VkInstanceCreateInfo createInfo{};
 			createInfo.sType			= VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -847,27 +855,65 @@ class HelloTriangleApplication
 
 		void createVertexBuffer()
 		{
-			VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+			VmaAllocatorCreateInfo allocatorInfo = {};
+			allocatorInfo.vulkanApiVersion		 = VK_API_VERSION_1_3;
+			allocatorInfo.physicalDevice		 = physicalDevice;
+			allocatorInfo.device				 = device;
+			allocatorInfo.instance				 = instance;
 
-			VkBuffer	   stagingBuffer;
-			VkDeviceMemory stagingBufferMemory;
+			if(vmaCreateAllocator(&allocatorInfo, &vmaAllocator) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create VMA allocator");
+			}
 
-			createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-						 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer,
-						 stagingBufferMemory);
+			VkBufferCreateInfo stagingBufferInfo;
+			stagingBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			stagingBufferInfo.size	= sizeof(vertices[0]) * vertices.size();
+			stagingBufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+			stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			stagingBufferInfo.pNext = nullptr;
+			stagingBufferInfo.flags = 0;
 
-			void *data;
-			vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
-			memcpy(data, vertices.data(), (size_t)bufferSize);
-			vkUnmapMemory(device, stagingBufferMemory);
+			VmaAllocationCreateInfo stagingAllocatorInfo = {};
+			stagingAllocatorInfo.usage					 = VMA_MEMORY_USAGE_CPU_ONLY;
+			stagingAllocatorInfo.flags					 = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
 
-			createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-						 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
+			VkBuffer	  stagingBuffer;
+			VmaAllocation stagingAllocation;
 
-			copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+			std::cout << vmaAllocator << '\n';
+			std::cout << &stagingBufferInfo << '\n';
+			std::cout << &stagingAllocatorInfo << '\n';
+			std::cout << &stagingBuffer << '\n';
+			std::cout << &stagingAllocation << '\n';
+			std::cout << "other" << '\n';
+			vmaCreateBuffer(vmaAllocator, &stagingBufferInfo, &stagingAllocatorInfo, &stagingBuffer, &stagingAllocation,
+							nullptr);
+			std::cout << "other" << '\n';
 
-			vkDestroyBuffer(device, stagingBuffer, nullptr);
-			vkFreeMemory(device, stagingBufferMemory, nullptr);
+			void *mappedData;
+			vmaMapMemory(vmaAllocator, stagingAllocation, &mappedData);
+			memcpy(mappedData, vertices.data(), sizeof(vertices[0]) * vertices.size());
+			vmaUnmapMemory(vmaAllocator, stagingAllocation);
+			std::cout << "other" << '\n';
+
+			VkBufferCreateInfo gpuBufferInfo;
+			gpuBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			gpuBufferInfo.size	= sizeof(vertices[0]) * vertices.size();
+			gpuBufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+			gpuBufferInfo.pNext = nullptr;
+			/*gpuBufferInfo.flags = 0;*/
+			/*stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;*/
+
+			VmaAllocationCreateInfo gpuAllocInfo = {
+				.usage = VMA_MEMORY_USAGE_GPU_ONLY // Allocates from DEVICE_LOCAL memory
+			};
+
+			vmaCreateBuffer(vmaAllocator, &gpuBufferInfo, &gpuAllocInfo, &vertexBuffer, &vertexAllocation, nullptr);
+
+			copyBuffer(stagingBuffer, vertexBuffer, sizeof(vertices[0]) * vertices.size());
+
+			vmaDestroyBuffer(vmaAllocator, stagingBuffer, stagingAllocation);
 		}
 
 		void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size)
@@ -999,9 +1045,11 @@ class HelloTriangleApplication
 			renderPassInfo.renderArea.offset = {0, 0};
 			renderPassInfo.renderArea.extent = swapChainExtent;
 
-			VkClearValue clearColor		   = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+			VkClearValue clearColor		   = {{{0.0f, 0.0f, 0.0f, 0.0f}}};
 			renderPassInfo.clearValueCount = 1;
 			renderPassInfo.pClearValues	   = &clearColor;
+
+			/*updateUniformBuffer(currentFrame, false);*/
 
 			vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -1011,9 +1059,40 @@ class HelloTriangleApplication
 			VkDeviceSize offsets[]		 = {0};
 			vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+			static int frame = 0;
+			frame++;
 
-			vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+			for (int i = 0; i < 3; i++)
+			{
+				UniformBufferObject ubo{};
+				ubo.model = glm::translate(glm::mat4(1.f), {i, -i, 0});
+
+				ubo.model = glm::rotate(ubo.model, frame * glm::radians(1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+
+				ubo.view =
+					glm::lookAt(glm::vec3(2.0f, -9.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+
+				ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height,
+											0.1f, 10.0f);
+
+				ubo.proj[1][1] *= -1;
+
+				vkCmdPushConstants(
+					commandBuffer, pipelineLayout,
+					VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, // Stages that use the push constant
+					0,														   // Offset (usually 0)
+					sizeof(UniformBufferObject),							   // Size
+					&ubo													   // Data pointer
+				);
+
+				/*vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				 * pipelineLayout, 0, 1,*/
+				/*						&descriptorSets[currentFrame],
+				 * 0, nullptr);*/
+
+				vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+			}
+
 			vkCmdEndRenderPass(commandBuffer);
 
 			if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
@@ -1290,12 +1369,17 @@ vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline
 			colorBlending.blendConstants[2] = 0.0f; // Optional
 			colorBlending.blendConstants[3] = 0.0f; // Optional
 
+			VkPushConstantRange pushConstant;
+			pushConstant.offset		= 0;
+			pushConstant.size		= sizeof(UniformBufferObject);
+			pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType				  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 			pipelineLayoutInfo.setLayoutCount		  = 1;
 			pipelineLayoutInfo.pSetLayouts			  = &descriptorSetLayout;
-			pipelineLayoutInfo.pushConstantRangeCount = 0;		 // Optional
-			pipelineLayoutInfo.pPushConstantRanges	  = nullptr; // Optional
+			pipelineLayoutInfo.pushConstantRangeCount = 1;			   // Optional
+			pipelineLayoutInfo.pPushConstantRanges	  = &pushConstant; // Optional
 
 			if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
 			{
@@ -1379,13 +1463,15 @@ vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline
 				throw std::runtime_error("failed to acquire swap chain image!");
 			}
 
-			updateUniformBuffer(currentFrame);
-
 			vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
 			vkResetCommandBuffer(commandBuffers[currentFrame], 0);
 
 			recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
+
+			/*updateUniformBuffer(currentFrame, false);*/
+
+			/*recordCommandBuffer(commandBuffers[currentFrame], imageIndex);*/
 
 			VkSubmitInfo submitInfo{};
 			submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1436,7 +1522,7 @@ vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline
 			currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 		}
 
-		void updateUniformBuffer(uint32_t currentImage)
+		void updateUniformBuffer(uint32_t currentImage, bool type)
 		{
 			static auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -1470,8 +1556,7 @@ vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline
 			vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 			vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
-			vkDestroyBuffer(device, vertexBuffer, nullptr);
-			vkFreeMemory(device, vertexBufferMemory, nullptr);
+			vmaDestroyBuffer(vmaAllocator, vertexBuffer, vertexAllocation);
 
 			for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 			{
