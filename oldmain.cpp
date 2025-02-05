@@ -1,17 +1,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <glm/ext/matrix_transform.hpp>
 #include <limits>
 #include <map>
 #include <optional>
 #include <set>
-#include <thread>
 #include <vector>
 #include <vulkan/vulkan.h>
-
-#define VMA_IMPLEMENTATION
-#include <vk_mem_alloc.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -33,187 +28,6 @@
 
 class Window
 {
-	public:
-		GLFWwindow *window;
-		bool		framebufferResized = false;
-
-		void setup(int width, int height, std::string name)
-		{
-			glfwInit();
-
-			glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-			glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-
-			window = glfwCreateWindow(width, height, name.c_str(), nullptr, nullptr);
-
-			glfwSetWindowUserPointer(window, this);
-			glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
-		}
-
-		static void framebufferResizeCallback(GLFWwindow *window, int width, int height)
-		{
-			((Window *)glfwGetWindowUserPointer(window))->framebufferResized = true;
-		}
-};
-
-class Instance
-{
-};
-
-struct Vertex
-{
-		glm::vec2 pos;
-		glm::vec3 color;
-
-		static VkVertexInputBindingDescription getBindingDescription()
-		{
-			VkVertexInputBindingDescription bindingDescription{};
-			bindingDescription.binding	 = 0;
-			bindingDescription.stride	 = sizeof(Vertex);
-			bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-			return bindingDescription;
-		}
-
-		static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions()
-		{
-			std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
-
-			attributeDescriptions[0].binding  = 0;
-			attributeDescriptions[0].location = 0;
-			attributeDescriptions[0].format	  = VK_FORMAT_R32G32_SFLOAT;
-			attributeDescriptions[0].offset	  = offsetof(Vertex, pos);
-
-			attributeDescriptions[1].binding  = 0;
-			attributeDescriptions[1].location = 1;
-			attributeDescriptions[1].format	  = VK_FORMAT_R32G32B32_SFLOAT;
-			attributeDescriptions[1].offset	  = offsetof(Vertex, color);
-
-			return attributeDescriptions;
-		}
-};
-
-class VertexBuffer
-{
-	public:
-		VkBuffer	  vertexBuffer;
-		VmaAllocation vertexAllocation;
-		int			  vertexCount;
-
-		void create(VkQueue graphicsQueue, VkCommandPool commandPool, VkPhysicalDevice physicalDevice, VkDevice device,
-					VkInstance instance, VmaAllocator vmaAllocator, std::vector<Vertex> vertices)
-		{
-			vertexCount = vertices.size();
-
-			VmaAllocatorCreateInfo allocatorInfo = {};
-			allocatorInfo.vulkanApiVersion		 = VK_API_VERSION_1_0;
-			allocatorInfo.physicalDevice		 = physicalDevice;
-			allocatorInfo.device				 = device;
-			allocatorInfo.instance				 = instance;
-
-			if (vmaCreateAllocator(&allocatorInfo, &vmaAllocator) != VK_SUCCESS)
-			{
-				throw std::runtime_error("Failed to create VMA allocator");
-			}
-
-			VkBufferCreateInfo stagingBufferInfo;
-			stagingBufferInfo.sType		  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-			stagingBufferInfo.size		  = sizeof(vertices[0]) * vertices.size();
-			stagingBufferInfo.usage		  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-			stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			stagingBufferInfo.flags		  = 0;
-			stagingBufferInfo.pNext		  = nullptr;
-
-			VmaAllocationCreateInfo stagingAllocatorInfo = {};
-			stagingAllocatorInfo.usage					 = VMA_MEMORY_USAGE_CPU_ONLY;
-			stagingAllocatorInfo.flags					 = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-
-			VkBuffer	  stagingBuffer;
-			VmaAllocation stagingAllocation;
-
-			vmaCreateBuffer(vmaAllocator, &stagingBufferInfo, &stagingAllocatorInfo, &stagingBuffer, &stagingAllocation,
-							nullptr);
-
-			void *mappedData;
-			vmaMapMemory(vmaAllocator, stagingAllocation, &mappedData);
-			memcpy(mappedData, vertices.data(), sizeof(vertices[0]) * vertices.size());
-			vmaUnmapMemory(vmaAllocator, stagingAllocation);
-
-			VkBufferCreateInfo gpuBufferInfo;
-			gpuBufferInfo.sType		  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-			gpuBufferInfo.size		  = sizeof(vertices[0]) * vertices.size();
-			gpuBufferInfo.usage		  = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-			gpuBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			gpuBufferInfo.flags		  = 0;
-			gpuBufferInfo.pNext		  = nullptr;
-
-			VmaAllocationCreateInfo gpuAllocInfo = {
-				.usage = VMA_MEMORY_USAGE_GPU_ONLY // Allocates from DEVICE_LOCAL memory
-			};
-
-			vmaCreateBuffer(vmaAllocator, &gpuBufferInfo, &gpuAllocInfo, &vertexBuffer, &vertexAllocation, nullptr);
-
-			copyBuffer(commandPool, device, graphicsQueue, stagingBuffer, vertexBuffer,
-					   sizeof(vertices[0]) * vertices.size());
-
-			vmaDestroyBuffer(vmaAllocator, stagingBuffer, stagingAllocation);
-		}
-
-		static void copyBuffer(VkCommandPool commandPool, VkDevice device, VkQueue graphicsQueue, VkBuffer srcBuffer,
-							   VkBuffer dstBuffer, VkDeviceSize size)
-		{
-			VkCommandBufferAllocateInfo allocInfo{};
-			allocInfo.sType				 = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-			allocInfo.level				 = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-			allocInfo.commandPool		 = commandPool;
-			allocInfo.commandBufferCount = 1;
-
-			VkCommandBuffer commandBuffer;
-			vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
-
-			VkCommandBufferBeginInfo beginInfo{};
-			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-			vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-			VkBufferCopy copyRegion{};
-			copyRegion.srcOffset = 0; // Optional
-			copyRegion.dstOffset = 0; // Optional
-			copyRegion.size		 = size;
-			vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
-
-			vkEndCommandBuffer(commandBuffer);
-
-			VkSubmitInfo submitInfo{};
-			submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			submitInfo.commandBufferCount = 1;
-			submitInfo.pCommandBuffers	  = &commandBuffer;
-
-			vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-			vkQueueWaitIdle(graphicsQueue);
-
-			vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
-		}
-
-		void destroy(VmaAllocator vmaAllocator)
-		{
-			vmaDestroyBuffer(vmaAllocator, vertexBuffer, vertexAllocation);
-		}
-};
-
-class DescriptorSet
-{
-	public:
-		VkDescriptorSet set;
-
-		void create()
-		{
-		}
-
-		void destroy()
-		{
-		}
 };
 
 class HelloTriangleApplication
@@ -247,19 +61,13 @@ class HelloTriangleApplication
 		VkPipeline				   graphicsPipeline;
 		std::vector<VkFramebuffer> swapChainFramebuffers;
 		VkCommandPool			   commandPool;
+		VkBuffer				   vertexBuffer;
+		VkDeviceMemory			   vertexBufferMemory;
 
-		VertexBuffer triangle;
-		VertexBuffer square;
-
-		VmaAllocator vmaAllocator;
-
-		VkDescriptorPool descriptorPool;
-		VkDescriptorSet	 descriptorSets;
-
-		VkCommandBuffer commandBuffers;
-		VkSemaphore		imageAvailableSemaphores;
-		VkSemaphore		renderFinishedSemaphores;
-		VkFence			inFlightFences;
+		std::vector<VkCommandBuffer> commandBuffers;
+		std::vector<VkSemaphore>	 imageAvailableSemaphores;
+		std::vector<VkSemaphore>	 renderFinishedSemaphores;
+		std::vector<VkFence>		 inFlightFences;
 
 		uint32_t currentFrame = 0;
 
@@ -268,9 +76,9 @@ class HelloTriangleApplication
 		VkBuffer	   indexBuffer;
 		VkDeviceMemory indexBufferMemory;
 
-		VkBuffer	   uniformBuffers;
-		VkDeviceMemory uniformBuffersMemory;
-		void		  *uniformBuffersMapped;
+		std::vector<VkBuffer>		uniformBuffers;
+		std::vector<VkDeviceMemory> uniformBuffersMemory;
+		std::vector<void *>			uniformBuffersMapped;
 
 		const std::vector<const char *> validationLayers = {"VK_LAYER_KHRONOS_validation"};
 		const std::vector<const char *> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -291,6 +99,45 @@ class HelloTriangleApplication
 			glfwSetWindowUserPointer(window, this);
 			glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
 		}
+
+		const int MAX_FRAMES_IN_FLIGHT = 2;
+
+		struct Vertex
+		{
+				glm::vec2 pos;
+				glm::vec3 color;
+
+				static VkVertexInputBindingDescription getBindingDescription()
+				{
+					VkVertexInputBindingDescription bindingDescription{};
+					bindingDescription.binding	 = 0;
+					bindingDescription.stride	 = sizeof(Vertex);
+					bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+					return bindingDescription;
+				}
+
+				static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions()
+				{
+					std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+					attributeDescriptions[0].binding  = 0;
+					attributeDescriptions[0].location = 0;
+					attributeDescriptions[0].format	  = VK_FORMAT_R32G32_SFLOAT;
+					attributeDescriptions[0].offset	  = offsetof(Vertex, pos);
+
+					attributeDescriptions[1].binding  = 0;
+					attributeDescriptions[1].location = 1;
+					attributeDescriptions[1].format	  = VK_FORMAT_R32G32B32_SFLOAT;
+					attributeDescriptions[1].offset	  = offsetof(Vertex, color);
+
+					return attributeDescriptions;
+				}
+		};
+
+		const std::vector<Vertex> vertices = {{{0.0f, -1.f}, {1.0f, 0.0f, 0.0f}},
+											  {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+											  {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}};
 
 		static void framebufferResizeCallback(GLFWwindow *window, int width, int height)
 		{
@@ -828,75 +675,26 @@ class HelloTriangleApplication
 			createCommandPool();
 			createVertexBuffer();
 			createUniformBuffers();
-			createDescriptorPool();
-			createDescriptorSets();
 			createCommandBuffer();
 			createSyncObjects();
-		}
-
-		void createDescriptorSets()
-		{
-			VkDescriptorSetLayout		layouts = descriptorSetLayout;
-			VkDescriptorSetAllocateInfo allocInfo{};
-			allocInfo.sType				 = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-			allocInfo.descriptorPool	 = descriptorPool;
-			allocInfo.descriptorSetCount = 1;
-			allocInfo.pSetLayouts		 = &layouts;
-
-			if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSets) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to allocate descriptor sets!");
-			}
-
-			VkDescriptorBufferInfo bufferInfo{};
-			bufferInfo.buffer = uniformBuffers;
-			bufferInfo.offset = 0;
-			bufferInfo.range  = sizeof(UniformBufferObject);
-
-			VkWriteDescriptorSet descriptorWrite{};
-			descriptorWrite.sType			= VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			descriptorWrite.dstSet			= descriptorSets;
-			descriptorWrite.dstBinding		= 0;
-			descriptorWrite.dstArrayElement = 0;
-
-			descriptorWrite.descriptorType	= VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			descriptorWrite.descriptorCount = 1;
-
-			descriptorWrite.pBufferInfo		 = &bufferInfo;
-			descriptorWrite.pImageInfo		 = nullptr; // Optional
-			descriptorWrite.pTexelBufferView = nullptr; // optional
-
-			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
-		}
-
-		void createDescriptorPool()
-		{
-			VkDescriptorPoolSize poolSize{};
-			poolSize.type			 = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			poolSize.descriptorCount = 1;
-
-			VkDescriptorPoolCreateInfo poolInfo{};
-			poolInfo.sType		   = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-			poolInfo.poolSizeCount = 1;
-			poolInfo.pPoolSizes	   = &poolSize;
-
-			poolInfo.maxSets = 1;
-
-			if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to create descriptor pool!");
-			}
 		}
 
 		void createUniformBuffers()
 		{
 			VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
-			createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-						 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffers,
-						 uniformBuffersMemory);
+			uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+			uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+			uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
 
-			vkMapMemory(device, uniformBuffersMemory, 0, bufferSize, 0, &uniformBuffersMapped);
+			for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+			{
+				createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+							 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+							 uniformBuffers[i], uniformBuffersMemory[i]);
+
+				vkMapMemory(device, uniformBuffersMemory[i], 0, bufferSize, 0, &uniformBuffersMapped[i]);
+			}
 		}
 
 		struct UniformBufferObject
@@ -960,18 +758,63 @@ class HelloTriangleApplication
 
 		void createVertexBuffer()
 		{
-			const std::vector<Vertex> triangleData = {{{0.0f, -1.f}, {1.0f, 0.0f, 0.0f}},	//
-													  {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},	//
-													  {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}}; //
-			const std::vector<Vertex> squareData   = {{{0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},	//
-													  {{0.0f, 0.5f}, {0.0f, 1.0f, 0.0f}},	//
-													  {{0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},	//
-													  {{0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},	//
-													  {{0.0f, 0.5f}, {0.0f, 1.0f, 0.0f}},	//
-													  {{5.5f, 0.5f}, {1.0f, 1.0f, 0.0f}}};	//
+			VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
 
-			triangle.create(graphicsQueue, commandPool, physicalDevice, device, instance, vmaAllocator, triangleData);
-			square.create(graphicsQueue, commandPool, physicalDevice, device, instance, vmaAllocator, squareData);
+			VkBuffer	   stagingBuffer;
+			VkDeviceMemory stagingBufferMemory;
+
+			createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+						 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer,
+						 stagingBufferMemory);
+
+			void *data;
+			vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+			memcpy(data, vertices.data(), (size_t)bufferSize);
+			vkUnmapMemory(device, stagingBufferMemory);
+
+			createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+						 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
+
+			copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+
+			vkDestroyBuffer(device, stagingBuffer, nullptr);
+			vkFreeMemory(device, stagingBufferMemory, nullptr);
+		}
+
+		void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size)
+		{
+			VkCommandBufferAllocateInfo allocInfo{};
+			allocInfo.sType				 = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+			allocInfo.level				 = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			allocInfo.commandPool		 = commandPool;
+			allocInfo.commandBufferCount = 1;
+
+			VkCommandBuffer commandBuffer;
+			vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+			VkCommandBufferBeginInfo beginInfo{};
+			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+			vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+			VkBufferCopy copyRegion{};
+			copyRegion.srcOffset = 0; // Optional
+			copyRegion.dstOffset = 0; // Optional
+			copyRegion.size		 = size;
+			vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+			vkEndCommandBuffer(commandBuffer);
+
+			VkSubmitInfo submitInfo{};
+			submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			submitInfo.commandBufferCount = 1;
+			submitInfo.pCommandBuffers	  = &commandBuffer;
+
+			vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+			vkQueueWaitIdle(graphicsQueue);
+
+			vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 		}
 
 		uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
@@ -1025,6 +868,10 @@ class HelloTriangleApplication
 
 		void createSyncObjects()
 		{
+			imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+			renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+			inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
 			VkSemaphoreCreateInfo semaphoreInfo{};
 			semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
@@ -1032,33 +879,19 @@ class HelloTriangleApplication
 			fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 			fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-			if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores) != VK_SUCCESS ||
-				vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores) != VK_SUCCESS ||
-				vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences) != VK_SUCCESS)
+			for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 			{
-				throw std::runtime_error("failed to create semaphores!");
+				if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
+					vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
+					vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to create semaphores!");
+				}
 			}
-		}
-
-		void cmddraw(VertexBuffer buffer, VkCommandBuffer commandBuffer, UniformBufferObject ubo)
-		{
-			VkBuffer	 vertexBuffers[] = {buffer.vertexBuffer};
-			VkDeviceSize offsets[]		 = {0};
-			vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-
-			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1,
-									&descriptorSets, 0, nullptr);
-			updateUniformBuffer(ubo, currentFrame);
-
-			vkCmdDraw(commandBuffer, buffer.vertexCount, 1, 0, 0);
 		}
 
 		void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
 		{
-
-			static int frame = 0;
-			frame++;
-
 			VkCommandBufferBeginInfo beginInfo{};
 			beginInfo.sType			   = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 			beginInfo.flags			   = 0;		  // Optional
@@ -1077,7 +910,7 @@ class HelloTriangleApplication
 			renderPassInfo.renderArea.offset = {0, 0};
 			renderPassInfo.renderArea.extent = swapChainExtent;
 
-			VkClearValue clearColor		   = {{{0.0f, 0.0f, 0.0f, 0.0f}}};
+			VkClearValue clearColor		   = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
 			renderPassInfo.clearValueCount = 1;
 			renderPassInfo.pClearValues	   = &clearColor;
 
@@ -1085,37 +918,11 @@ class HelloTriangleApplication
 
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-			{
-				UniformBufferObject ubo{};
-				ubo.model = glm::translate(glm::mat4(1.f), {0, -0, 0});
+			VkBuffer	 vertexBuffers[] = {vertexBuffer};
+			VkDeviceSize offsets[]		 = {0};
+			vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-				ubo.model = glm::rotate(ubo.model, frame * glm::radians(1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-
-				ubo.view =
-					glm::lookAt(glm::vec3(2.0f, -9.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-
-				ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height,
-											0.1f, 10.0f);
-
-				ubo.proj[1][1] *= -1;
-
-				cmddraw(triangle, commandBuffer, ubo);
-
-				ubo.model = glm::translate(glm::mat4(1.f), {4, -0, 0});
-
-				ubo.model = glm::rotate(ubo.model, frame * glm::radians(1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-
-				ubo.view =
-					glm::lookAt(glm::vec3(2.0f, -9.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-
-				ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height,
-											0.1f, 10.0f);
-
-				ubo.proj[1][1] *= -1;
-
-				cmddraw(square, commandBuffer, ubo);
-			}
-
+			vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 			vkCmdEndRenderPass(commandBuffer);
 
 			if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
@@ -1126,13 +933,14 @@ class HelloTriangleApplication
 
 		void createCommandBuffer()
 		{
+			commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 			VkCommandBufferAllocateInfo allocInfo{};
 			allocInfo.sType				 = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 			allocInfo.commandPool		 = commandPool;
 			allocInfo.level				 = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-			allocInfo.commandBufferCount = 1;
+			allocInfo.commandBufferCount = commandBuffers.size();
 
-			if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffers) != VK_SUCCESS)
+			if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS)
 			{
 				throw std::runtime_error("failed to allocate command buffers!");
 			}
@@ -1352,8 +1160,8 @@ class HelloTriangleApplication
 
 			rasterizer.lineWidth = 1.0f;
 
-			rasterizer.cullMode	 = VK_CULL_MODE_NONE;
-			rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+			rasterizer.cullMode	 = VK_CULL_MODE_BACK_BIT;
+			rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
 
 			rasterizer.depthBiasEnable		   = VK_FALSE;
 			rasterizer.depthBiasConstantFactor = 0.0f; // Optional
@@ -1391,15 +1199,10 @@ class HelloTriangleApplication
 			colorBlending.blendConstants[2] = 0.0f; // Optional
 			colorBlending.blendConstants[3] = 0.0f; // Optional
 
-			VkPushConstantRange pushConstant;
-			pushConstant.offset		= 0;
-			pushConstant.size		= sizeof(UniformBufferObject);
-			pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType				  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-			pipelineLayoutInfo.setLayoutCount		  = 1;
-			pipelineLayoutInfo.pSetLayouts			  = &descriptorSetLayout;
+			pipelineLayoutInfo.setLayoutCount		  = 1;		 
+			pipelineLayoutInfo.pSetLayouts			  = &descriptorSetLayout; 
 			pipelineLayoutInfo.pushConstantRangeCount = 0;		 // Optional
 			pipelineLayoutInfo.pPushConstantRanges	  = nullptr; // Optional
 
@@ -1452,7 +1255,6 @@ class HelloTriangleApplication
 		{
 			while (!glfwWindowShouldClose(window))
 			{
-				std::this_thread::sleep_for(std::chrono::milliseconds(20));
 				auto start = std::chrono::system_clock::now();
 				glfwPollEvents();
 
@@ -1469,11 +1271,11 @@ class HelloTriangleApplication
 
 		void drawFrame()
 		{
-			vkWaitForFences(device, 1, &inFlightFences, VK_TRUE, UINT64_MAX);
+			vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
 			uint32_t imageIndex;
-			VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores,
-													VK_NULL_HANDLE, &imageIndex);
+			VkResult result = vkAcquireNextImageKHR(
+				device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
 
 			if (result == VK_ERROR_OUT_OF_DATE_KHR)
 			{
@@ -1486,33 +1288,31 @@ class HelloTriangleApplication
 				throw std::runtime_error("failed to acquire swap chain image!");
 			}
 
-			vkResetFences(device, 1, &inFlightFences);
+updateUniformBuffer(currentFrame);
 
-			vkResetCommandBuffer(commandBuffers, 0);
+			vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
-			recordCommandBuffer(commandBuffers, imageIndex);
+			vkResetCommandBuffer(commandBuffers[currentFrame], 0);
 
-			/*updateUniformBuffer(currentFrame, false);*/
-
-			/*recordCommandBuffer(commandBuffers[currentFrame], imageIndex);*/
+			recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
 
 			VkSubmitInfo submitInfo{};
 			submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-			VkSemaphore			 waitSemaphores[] = {imageAvailableSemaphores};
+			VkSemaphore			 waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
 			VkPipelineStageFlags waitStages[]	  = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
 			submitInfo.waitSemaphoreCount		  = 1;
 			submitInfo.pWaitSemaphores			  = waitSemaphores;
 			submitInfo.pWaitDstStageMask		  = waitStages;
 
 			submitInfo.commandBufferCount = 1;
-			submitInfo.pCommandBuffers	  = &commandBuffers;
+			submitInfo.pCommandBuffers	  = &commandBuffers[currentFrame];
 
-			VkSemaphore signalSemaphores[]	= {renderFinishedSemaphores};
+			VkSemaphore signalSemaphores[]	= {renderFinishedSemaphores[currentFrame]};
 			submitInfo.signalSemaphoreCount = 1;
 			submitInfo.pSignalSemaphores	= signalSemaphores;
 
-			if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences) != VK_SUCCESS)
+			if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS)
 			{
 				throw std::runtime_error("failed to submit draw command buffer!");
 			}
@@ -1542,32 +1342,48 @@ class HelloTriangleApplication
 				throw std::runtime_error("failed to present swap chain image!");
 			}
 
-			currentFrame = (currentFrame + 1) % 2;
+			currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 		}
 
-		void updateUniformBuffer(UniformBufferObject ubo, int currentImage)
-		{
-			memcpy(uniformBuffersMapped, &ubo, sizeof(ubo));
-		}
+void updateUniformBuffer(uint32_t currentImage) {
+static auto startTime = std::chrono::high_resolution_clock::now();
+
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
+
+UniformBufferObject ubo{};
+ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 10.0f);
+
+ubo.proj[1][1] *= -1;
+
+memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+}
 
 		void cleanup()
 		{
 			cleanupSwapChain();
 
-			vkDestroyBuffer(device, uniformBuffers, nullptr);
-			vkFreeMemory(device, uniformBuffersMemory, nullptr);
+			for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+			{
+				vkDestroyBuffer(device, uniformBuffers[i], nullptr);
+				vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
+			}
 
-			vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 			vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
-			triangle.destroy(vmaAllocator);
-			square.destroy(vmaAllocator);
+			vkDestroyBuffer(device, vertexBuffer, nullptr);
+			vkFreeMemory(device, vertexBufferMemory, nullptr);
 
-			vmaDestroyAllocator(vmaAllocator);
-
-			vkDestroySemaphore(device, imageAvailableSemaphores, nullptr);
-			vkDestroySemaphore(device, renderFinishedSemaphores, nullptr);
-			vkDestroyFence(device, inFlightFences, nullptr);
+			for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+			{
+				vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+				vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+				vkDestroyFence(device, inFlightFences[i], nullptr);
+			}
 
 			vkDestroyCommandPool(device, commandPool, nullptr);
 

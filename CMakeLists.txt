@@ -8,7 +8,8 @@ set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set (CMAKE_CXX_STANDARD 17)
 #set(CMAKE_CXX_COMPILER "g++")
-# set(CMAKE_TOOLCHAIN_FILE "/home/z/Documents/cod/CPP/Vizium/vcpkg/scripts/buildsystems/vcpkg.cmake")
+# set(CMAKE_TOOLCHAIN_FILE "/home/z/Documents/cod/Vizium/vcpkg/scripts/buildsystems/vcpkg.cmake")
+set(VulkanMemoryAllocator_DIR "./vcpkg/packages/vulkan-memory-allocator_x64-linux/share/VulkanMemoryAllocator")
 
 # set(CMAKE_BUILD_TYPE Debug) # default build
 
@@ -28,6 +29,7 @@ elseif(CMAKE_BUILD_TYPE MATCHES Release)
 	message(STATUS "Building with release flags")
 endif()
 
+	# set (CMAKE_CXX_FLAGS "-g -fsanitize=address")
 add_executable(a ${SRC})
 target_link_libraries(a PRIVATE Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator)
 target_link_libraries(a PRIVATE glfw)

@@ -1,7 +1,5 @@
 .cache/clangd/index
+VulkanMemoryAllocator
 bin
 build
-oldmain.cpp
 vcpkg
-temp/vulkan-memory-allocator
-VulkanMemoryAllocator
