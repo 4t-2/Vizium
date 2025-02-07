@@ -36,6 +36,256 @@
 
 // Vizium
 
+class Queue
+{
+	public:
+		VkQueue queue;
+
+		enum Type
+		{
+			GRAPHICS,
+			PRESENTATION,
+			COMPUTE,
+			TRANSFER,
+		};
+
+		void setup(VkPhysicalDevice physicalDevice, VkDevice device, VkSurfaceKHR surface, Type type)
+		{
+			uint32_t queueFamilyCount;
+			vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+			std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+			vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+
+			uint32_t i = 0;
+			for (auto &family : queueFamilies)
+			{
+				if (type == Type::GRAPHICS)
+				{
+					if (family.queueFlags & VK_QUEUE_GRAPHICS_BIT)
+					{
+						break;
+					}
+				}
+				else if (type == Type::PRESENTATION)
+				{
+					VkBool32 presentSupport = false;
+					vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, surface, &presentSupport);
+
+					if (presentSupport)
+					{
+						break;
+					}
+				}
+				else if (type == Type::COMPUTE)
+				{
+					if (family.queueFlags & VK_QUEUE_COMPUTE_BIT)
+					{
+						break;
+					}
+				}
+
+				i++;
+			}
+
+			vkGetDeviceQueue(device, i, 0, &queue);
+		}
+};
+
+class Command
+{
+	public:
+		VkCommandBuffer buffer;
+};
+
+class CommandPool
+{
+	public:
+		VkCommandPool commandPool;
+
+		void setup(VkDevice device, uint32_t graphicsFamilyIndex)
+		{
+			VkCommandPoolCreateInfo poolInfo{};
+			poolInfo.sType			  = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+			poolInfo.flags			  = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+			poolInfo.queueFamilyIndex = graphicsFamilyIndex;
+
+			if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create command pool!");
+			}
+		}
+
+		Command allocate(VkDevice device)
+		{
+			Command command;
+
+			VkCommandBufferAllocateInfo allocInfo{};
+			allocInfo.sType				 = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+			allocInfo.commandPool		 = commandPool;
+			allocInfo.level				 = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			allocInfo.commandBufferCount = 1;
+
+			if (vkAllocateCommandBuffers(device, &allocInfo, &command.buffer) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to allocate command buffers!");
+			}
+
+			return command;
+		}
+
+		void free(Command command, VkQueue queue, VkDevice device)
+		{
+			vkEndCommandBuffer(command.buffer);
+
+			VkSubmitInfo submitInfo{};
+			submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			submitInfo.commandBufferCount = 1;
+			submitInfo.pCommandBuffers	  = &command.buffer;
+
+			vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+			vkQueueWaitIdle(queue);
+
+			vkFreeCommandBuffers(device, commandPool, 1, &command.buffer);
+		}
+};
+
+class Buffer
+{
+	public:
+		VkBuffer	  buffer;
+		VmaAllocation allocation;
+};
+
+class Allocator
+{
+	public:
+		VmaAllocator vmaAllocator;
+
+		void setup(VkPhysicalDevice physicalDevice, VkDevice device, VkInstance instance)
+		{
+			VmaAllocatorCreateInfo allocatorInfo = {};
+			allocatorInfo.vulkanApiVersion		 = VK_API_VERSION_1_3;
+			allocatorInfo.physicalDevice		 = physicalDevice;
+			allocatorInfo.device				 = device;
+			allocatorInfo.instance				 = instance;
+
+			if (vmaCreateAllocator(&allocatorInfo, &vmaAllocator) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create VMA allocator");
+			}
+		}
+
+		Buffer stageAllocate(int size, void *data, unsigned int BUFFER_USAGE, VkCommandPool commandPool,
+							 VkDevice device, VkQueue graphicsQueue)
+		{
+			Buffer buffer;
+
+			VkBufferCreateInfo stagingBufferInfo;
+			stagingBufferInfo.sType		  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			stagingBufferInfo.size		  = size;
+			stagingBufferInfo.usage		  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+			stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			stagingBufferInfo.flags		  = 0;
+			stagingBufferInfo.pNext		  = nullptr;
+
+			VmaAllocationCreateInfo stagingAllocatorInfo = {};
+			stagingAllocatorInfo.usage					 = VMA_MEMORY_USAGE_CPU_ONLY;
+			stagingAllocatorInfo.flags					 = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+			VkBuffer	  stagingBuffer;
+			VmaAllocation stagingAllocation;
+
+			vmaCreateBuffer(vmaAllocator, &stagingBufferInfo, &stagingAllocatorInfo, &stagingBuffer, &stagingAllocation,
+							nullptr);
+
+			void *mappedData;
+			vmaMapMemory(vmaAllocator, stagingAllocation, &mappedData);
+			memcpy(mappedData, data, size);
+			vmaUnmapMemory(vmaAllocator, stagingAllocation);
+
+			VkBufferCreateInfo gpuBufferInfo;
+			gpuBufferInfo.sType		  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			gpuBufferInfo.size		  = size;
+			gpuBufferInfo.usage		  = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+			gpuBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			gpuBufferInfo.flags		  = 0;
+			gpuBufferInfo.pNext		  = nullptr;
+
+			VmaAllocationCreateInfo gpuAllocInfo = {
+				.usage = VMA_MEMORY_USAGE_GPU_ONLY // Allocates from DEVICE_LOCAL memory
+			};
+
+			vmaCreateBuffer(vmaAllocator, &gpuBufferInfo, &gpuAllocInfo, &buffer.buffer, &buffer.allocation, nullptr);
+
+			// copy
+			VkCommandBufferAllocateInfo allocInfo{};
+			allocInfo.sType				 = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+			allocInfo.level				 = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			allocInfo.commandPool		 = commandPool;
+			allocInfo.commandBufferCount = 1;
+
+			VkCommandBuffer commandBuffer;
+			vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+			VkCommandBufferBeginInfo beginInfo{};
+			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+			vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+			VkBufferCopy copyRegion{};
+			copyRegion.srcOffset = 0; // Optional
+			copyRegion.dstOffset = 0; // Optional
+			copyRegion.size		 = size;
+			vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer.buffer, 1, &copyRegion);
+
+			vkEndCommandBuffer(commandBuffer);
+
+			VkSubmitInfo submitInfo{};
+			submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			submitInfo.commandBufferCount = 1;
+			submitInfo.pCommandBuffers	  = &commandBuffer;
+
+			vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+			vkQueueWaitIdle(graphicsQueue);
+
+			vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+
+			vmaDestroyBuffer(vmaAllocator, stagingBuffer, stagingAllocation);
+
+			return buffer;
+		}
+
+		Buffer allocate(int size, unsigned int usage, VkDevice device)
+		{
+			Buffer buffer;
+
+			VkBufferCreateInfo bufferInfo{};
+			bufferInfo.sType	   = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			bufferInfo.size		   = size;
+			bufferInfo.usage	   = usage;
+			bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+			VmaAllocationCreateInfo allocatorInfo;
+			allocatorInfo.usage = VMA_MEMORY_USAGE_AUTO;
+			allocatorInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+			vmaCreateBuffer(vmaAllocator, &bufferInfo, &allocatorInfo, &buffer.buffer, &buffer.allocation, nullptr);
+
+			return buffer;
+		}
+
+		void free(Buffer buffer)
+		{
+			vmaDestroyBuffer(vmaAllocator, buffer.buffer, buffer.allocation);
+		}
+
+		void destroy()
+		{
+			vmaDestroyAllocator(vmaAllocator);
+		}
+};
+
 class Window
 {
 	public:
@@ -101,98 +351,21 @@ struct Vertex
 class VertexBuffer
 {
 	public:
-		VkBuffer	  vertexBuffer;
-		VmaAllocation vertexAllocation;
-		int			  vertexCount;
+		Buffer buffer;
+		int	   vertexCount;
 
 		void create(VkQueue graphicsQueue, VkCommandPool commandPool, VkPhysicalDevice physicalDevice, VkDevice device,
-					VkInstance instance, VmaAllocator vmaAllocator, std::vector<Vertex> vertices)
+					VkInstance instance, Allocator vmaAllocator, std::vector<Vertex> vertices)
 		{
 			vertexCount = vertices.size();
 
-			VkBufferCreateInfo stagingBufferInfo;
-			stagingBufferInfo.sType		  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-			stagingBufferInfo.size		  = sizeof(vertices[0]) * vertices.size();
-			stagingBufferInfo.usage		  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-			stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			stagingBufferInfo.flags		  = 0;
-			stagingBufferInfo.pNext		  = nullptr;
-
-			VmaAllocationCreateInfo stagingAllocatorInfo = {};
-			stagingAllocatorInfo.usage					 = VMA_MEMORY_USAGE_CPU_ONLY;
-			stagingAllocatorInfo.flags					 = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-
-			VkBuffer	  stagingBuffer;
-			VmaAllocation stagingAllocation;
-
-			vmaCreateBuffer(vmaAllocator, &stagingBufferInfo, &stagingAllocatorInfo, &stagingBuffer, &stagingAllocation,
-							nullptr);
-
-			void *mappedData;
-			vmaMapMemory(vmaAllocator, stagingAllocation, &mappedData);
-			memcpy(mappedData, vertices.data(), sizeof(vertices[0]) * vertices.size());
-			vmaUnmapMemory(vmaAllocator, stagingAllocation);
-
-			VkBufferCreateInfo gpuBufferInfo;
-			gpuBufferInfo.sType		  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-			gpuBufferInfo.size		  = sizeof(vertices[0]) * vertices.size();
-			gpuBufferInfo.usage		  = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-			gpuBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			gpuBufferInfo.flags		  = 0;
-			gpuBufferInfo.pNext		  = nullptr;
-
-			VmaAllocationCreateInfo gpuAllocInfo = {
-				.usage = VMA_MEMORY_USAGE_GPU_ONLY // Allocates from DEVICE_LOCAL memory
-			};
-
-			vmaCreateBuffer(vmaAllocator, &gpuBufferInfo, &gpuAllocInfo, &vertexBuffer, &vertexAllocation, nullptr);
-
-			copyBuffer(commandPool, device, graphicsQueue, stagingBuffer, vertexBuffer,
-					   sizeof(vertices[0]) * vertices.size());
-
-			vmaDestroyBuffer(vmaAllocator, stagingBuffer, stagingAllocation);
+			buffer = vmaAllocator.stageAllocate(sizeof(vertices[0]) * vertexCount, vertices.data(),
+												VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, commandPool, device, graphicsQueue);
 		}
 
-		static void copyBuffer(VkCommandPool commandPool, VkDevice device, VkQueue graphicsQueue, VkBuffer srcBuffer,
-							   VkBuffer dstBuffer, VkDeviceSize size)
+		void destroy(Allocator allocator)
 		{
-			VkCommandBufferAllocateInfo allocInfo{};
-			allocInfo.sType				 = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-			allocInfo.level				 = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-			allocInfo.commandPool		 = commandPool;
-			allocInfo.commandBufferCount = 1;
-
-			VkCommandBuffer commandBuffer;
-			vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
-
-			VkCommandBufferBeginInfo beginInfo{};
-			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-			vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-			VkBufferCopy copyRegion{};
-			copyRegion.srcOffset = 0; // Optional
-			copyRegion.dstOffset = 0; // Optional
-			copyRegion.size		 = size;
-			vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
-
-			vkEndCommandBuffer(commandBuffer);
-
-			VkSubmitInfo submitInfo{};
-			submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			submitInfo.commandBufferCount = 1;
-			submitInfo.pCommandBuffers	  = &commandBuffer;
-
-			vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-			vkQueueWaitIdle(graphicsQueue);
-
-			vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
-		}
-
-		void destroy(VmaAllocator vmaAllocator)
-		{
-			vmaDestroyBuffer(vmaAllocator, vertexBuffer, vertexAllocation);
+			allocator.free(buffer);
 		}
 };
 
@@ -210,7 +383,8 @@ class DescriptorBuffer
 		VkBuffer		uniformBuffers;
 		VkDeviceMemory	uniformBuffersMemory;
 		void		   *uniformBuffersMapped;
-		VkDescriptorSet descriptorSets2;
+
+		VkDescriptorSet imageDescriptor;
 
 		VkInstance		 &instance;
 		VkDevice		 &device;
@@ -267,7 +441,7 @@ class DescriptorBuffer
 		}
 
 		void create(VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
-					VkImageView textureImageView, VkSampler textureSampler)
+					VkImageView textureImageView, VkSampler textureSampler, VkDescriptorSetLayout textureLayout)
 		{
 			// UNIFORM
 			VkDeviceSize bufferSize = sizeof(UniformBufferObject);
@@ -280,48 +454,69 @@ class DescriptorBuffer
 
 			// SET
 
-			VkDescriptorSetLayout		layouts = descriptorSetLayout;
-			VkDescriptorSetAllocateInfo allocInfo{};
-			allocInfo.sType				 = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-			allocInfo.descriptorPool	 = descriptorPool;
-			allocInfo.descriptorSetCount = 1;
-			allocInfo.pSetLayouts		 = &layouts;
-
-			if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSets) != VK_SUCCESS)
 			{
-				throw std::runtime_error("failed to allocate descriptor sets!");
+				VkDescriptorSetLayout		layouts = descriptorSetLayout;
+				VkDescriptorSetAllocateInfo allocInfo{};
+				allocInfo.sType				 = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+				allocInfo.descriptorPool	 = descriptorPool;
+				allocInfo.descriptorSetCount = 1;
+				allocInfo.pSetLayouts		 = &layouts;
+
+				if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSets) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to allocate descriptor sets!");
+				}
+			}
+			{
+				VkDescriptorSetLayout		layouts = textureLayout;
+				VkDescriptorSetAllocateInfo allocInfo{};
+				allocInfo.sType				 = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+				allocInfo.descriptorPool	 = descriptorPool;
+				allocInfo.descriptorSetCount = 1;
+				allocInfo.pSetLayouts		 = &layouts;
+
+				if (vkAllocateDescriptorSets(device, &allocInfo, &imageDescriptor) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to allocate descriptor sets!");
+				}
 			}
 
-			VkDescriptorBufferInfo bufferInfo{};
-			bufferInfo.buffer = uniformBuffers;
-			bufferInfo.offset = 0;
-			bufferInfo.range  = sizeof(UniformBufferObject);
+			{
+				VkDescriptorBufferInfo bufferInfo{};
+				bufferInfo.buffer = uniformBuffers;
+				bufferInfo.offset = 0;
+				bufferInfo.range  = sizeof(UniformBufferObject);
 
-			VkDescriptorImageInfo imageInfo;
-			imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			imageInfo.imageView	  = textureImageView;
-			imageInfo.sampler	  = textureSampler;
+				VkWriteDescriptorSet descriptorWrite;
+				descriptorWrite.sType			 = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				descriptorWrite.dstSet			 = descriptorSets;
+				descriptorWrite.dstBinding		 = 0;
+				descriptorWrite.dstArrayElement	 = 0;
+				descriptorWrite.descriptorType	 = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				descriptorWrite.descriptorCount	 = 1;
+				descriptorWrite.pBufferInfo		 = &bufferInfo;
+				descriptorWrite.pImageInfo		 = nullptr; // Optional
+				descriptorWrite.pTexelBufferView = nullptr; // optional
 
-			std::array<VkWriteDescriptorSet, 2> descriptorWrite{};
-			descriptorWrite[0].sType			= VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			descriptorWrite[0].dstSet			= descriptorSets;
-			descriptorWrite[0].dstBinding		= 0;
-			descriptorWrite[0].dstArrayElement	= 0;
-			descriptorWrite[0].descriptorType	= VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			descriptorWrite[0].descriptorCount	= 1;
-			descriptorWrite[0].pBufferInfo		= &bufferInfo;
-			descriptorWrite[0].pImageInfo		= nullptr; // Optional
-			descriptorWrite[0].pTexelBufferView = nullptr; // optional
+				vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+			}
+			{
+				VkDescriptorImageInfo imageInfo;
+				imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				imageInfo.imageView	  = textureImageView;
+				imageInfo.sampler	  = textureSampler;
 
-			descriptorWrite[1].sType			= VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			descriptorWrite[1].dstSet			= descriptorSets;
-			descriptorWrite[1].dstBinding		= 1;
-			descriptorWrite[1].dstArrayElement = 0;
-			descriptorWrite[1].descriptorType	= VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			descriptorWrite[1].descriptorCount = 1;
-			descriptorWrite[1].pImageInfo		= &imageInfo;
+				VkWriteDescriptorSet descriptorWrite;
+				descriptorWrite.sType			= VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				descriptorWrite.dstSet			= imageDescriptor;
+				descriptorWrite.dstBinding		= 1;
+				descriptorWrite.dstArrayElement = 0;
+				descriptorWrite.descriptorType	= VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				descriptorWrite.descriptorCount = 1;
+				descriptorWrite.pImageInfo		= &imageInfo;
 
-			vkUpdateDescriptorSets(device, descriptorWrite.size(), descriptorWrite.data(), 0, nullptr);
+				vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+			}
 		}
 
 		void destroy()
@@ -375,7 +570,7 @@ class HelloTriangleApplication
 		VertexBuffer triangle;
 		VertexBuffer square;
 
-		VmaAllocator vmaAllocator;
+		Allocator vmaAllocator;
 
 		VkDescriptorPool descriptorPool;
 
@@ -1217,7 +1412,8 @@ class HelloTriangleApplication
 
 		void createDescriptorSets()
 		{
-			descriptorBuffer.create(descriptorPool, descriptorSetLayout, textureImageView, textureSampler);
+			descriptorBuffer.create(descriptorPool, descriptorSetLayout, textureImageView, textureSampler,
+									textureLayout);
 			/*descriptorBuffer2.create(descriptorPool, descriptorSetLayout);*/
 
 			/*{*/
@@ -1278,29 +1474,40 @@ class HelloTriangleApplication
 
 		void createDescriptorSetLayout()
 		{
-			VkDescriptorSetLayoutBinding uboLayoutBinding{};
-			uboLayoutBinding.binding			= 0;
-			uboLayoutBinding.descriptorType		= VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			uboLayoutBinding.descriptorCount	= 1;
-			uboLayoutBinding.stageFlags			= VK_SHADER_STAGE_VERTEX_BIT;
-			uboLayoutBinding.pImmutableSamplers = nullptr; // Optional
-
-			VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-			samplerLayoutBinding.binding			= 1;
-			samplerLayoutBinding.descriptorCount	= 1;
-			samplerLayoutBinding.descriptorType		= VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			samplerLayoutBinding.pImmutableSamplers = nullptr;
-			samplerLayoutBinding.stageFlags			= VK_SHADER_STAGE_FRAGMENT_BIT;
-
-			std::array						bindings = {uboLayoutBinding, samplerLayoutBinding};
-			VkDescriptorSetLayoutCreateInfo layoutInfo{};
-			layoutInfo.sType		= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-			layoutInfo.bindingCount = bindings.size();
-			layoutInfo.pBindings	= bindings.data();
-
-			if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS)
 			{
-				throw std::runtime_error("failed to create descriptor set layout!");
+				VkDescriptorSetLayoutBinding uboLayoutBinding{};
+				uboLayoutBinding.binding			= 0;
+				uboLayoutBinding.descriptorType		= VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				uboLayoutBinding.descriptorCount	= 1;
+				uboLayoutBinding.stageFlags			= VK_SHADER_STAGE_VERTEX_BIT;
+				uboLayoutBinding.pImmutableSamplers = nullptr; // Optional
+
+				VkDescriptorSetLayoutCreateInfo layoutInfo{};
+				layoutInfo.sType		= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+				layoutInfo.bindingCount = 1;
+				layoutInfo.pBindings	= &uboLayoutBinding;
+				if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to create descriptor set layout!");
+				}
+			}
+
+			{
+				VkDescriptorSetLayoutBinding samplerLayoutBinding{};
+				samplerLayoutBinding.binding			= 1;
+				samplerLayoutBinding.descriptorCount	= 1;
+				samplerLayoutBinding.descriptorType		= VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				samplerLayoutBinding.pImmutableSamplers = nullptr;
+				samplerLayoutBinding.stageFlags			= VK_SHADER_STAGE_FRAGMENT_BIT;
+
+				VkDescriptorSetLayoutCreateInfo layoutInfo{};
+				layoutInfo.sType		= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+				layoutInfo.bindingCount = 1;
+				layoutInfo.pBindings	= &samplerLayoutBinding;
+				if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &textureLayout) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to create descriptor set layout!");
+				}
 			}
 		}
 
@@ -1336,16 +1543,8 @@ class HelloTriangleApplication
 
 		void createVertexBuffer()
 		{
-			VmaAllocatorCreateInfo allocatorInfo = {};
-			allocatorInfo.vulkanApiVersion		 = VK_API_VERSION_1_3;
-			allocatorInfo.physicalDevice		 = physicalDevice;
-			allocatorInfo.device				 = device;
-			allocatorInfo.instance				 = instance;
+			vmaAllocator.setup(physicalDevice, device, instance);
 
-			if (vmaCreateAllocator(&allocatorInfo, &vmaAllocator) != VK_SUCCESS)
-			{
-				throw std::runtime_error("Failed to create VMA allocator");
-			}
 			const std::vector<Vertex> triangleData = {{{0.0f, -1.f, 0}, {1.0f, 0.0f, 0.0f}},   //
 													  {{0.5f, 0.5f, 0}, {0.0f, 1.0f, 0.0f}},   //
 													  {{-0.5f, 0.5f, 0}, {0.0f, 0.0f, 1.0f}}}; //
@@ -1443,12 +1642,13 @@ class HelloTriangleApplication
 			scissor.extent = swapChainExtent;
 			vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-			VkBuffer	 vertexBuffers[] = {buffer.vertexBuffer};
+			VkBuffer	 vertexBuffers[] = {buffer.buffer.buffer};
 			VkDeviceSize offsets[]		 = {0};
 			vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1,
-									&descriptorBuffer.descriptorSets, 0, nullptr);
+			vkCmdBindDescriptorSets(
+				commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 2,
+				std::array{descriptorBuffer.descriptorSets, descriptorBuffer.imageDescriptor}.data(), 0, nullptr);
 
 			vkCmdDraw(commandBuffer, buffer.vertexCount, 1, 0, 0);
 		}
@@ -1791,10 +1991,11 @@ class HelloTriangleApplication
 			pushConstant.size		= sizeof(UniformBufferObject);
 			pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
+			std::array				   layouts = {descriptorSetLayout, textureLayout};
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType				  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-			pipelineLayoutInfo.setLayoutCount		  = 1;
-			pipelineLayoutInfo.pSetLayouts			  = &descriptorSetLayout;
+			pipelineLayoutInfo.setLayoutCount		  = 2;
+			pipelineLayoutInfo.pSetLayouts			  = layouts.data();
 			pipelineLayoutInfo.pushConstantRangeCount = 0;		 // Optional
 			pipelineLayoutInfo.pPushConstantRanges	  = nullptr; // Optional
 
@@ -1958,7 +2159,7 @@ class HelloTriangleApplication
 			triangle.destroy(vmaAllocator);
 			square.destroy(vmaAllocator);
 
-			vmaDestroyAllocator(vmaAllocator);
+			vmaAllocator.destroy();
 
 			vkDestroySemaphore(device, imageAvailableSemaphores, nullptr);
 			vkDestroySemaphore(device, renderFinishedSemaphores, nullptr);
