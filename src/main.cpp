@@ -154,12 +154,44 @@ class Buffer
 	public:
 		VkBuffer	  buffer;
 		VmaAllocation allocation;
+
+		VmaAllocator *allocator;
+
+		void map(void **map)
+		{
+			vmaMapMemory(*allocator, allocation, map);
+		}
+
+		void unmap()
+		{
+			vmaUnmapMemory(*allocator, allocation);
+		}
+
+		void destroy()
+		{
+			vmaDestroyBuffer(*allocator, buffer, allocation);
+		}
+};
+
+class Image
+{
+	public:
+		VkImage		  image;
+		VmaAllocation allocation;
+		VmaAllocator *allocator;
+
+		void destroy()
+		{
+			vmaDestroyImage(*allocator, image, allocation);
+		}
 };
 
 class Allocator
 {
 	public:
-		VmaAllocator vmaAllocator;
+		VmaAllocator	 vmaAllocator;
+		VkDevice		 device;
+		VkPhysicalDevice physicalDevice;
 
 		void setup(VkPhysicalDevice physicalDevice, VkDevice device, VkInstance instance)
 		{
@@ -169,6 +201,9 @@ class Allocator
 			allocatorInfo.device				 = device;
 			allocatorInfo.instance				 = instance;
 
+			this->device		 = device;
+			this->physicalDevice = physicalDevice;
+
 			if (vmaCreateAllocator(&allocatorInfo, &vmaAllocator) != VK_SUCCESS)
 			{
 				throw std::runtime_error("Failed to create VMA allocator");
@@ -176,46 +211,17 @@ class Allocator
 		}
 
 		Buffer stageAllocate(int size, void *data, unsigned int BUFFER_USAGE, VkCommandPool commandPool,
-							 VkDevice device, VkQueue graphicsQueue)
+							 VkQueue graphicsQueue)
 		{
-			Buffer buffer;
-
-			VkBufferCreateInfo stagingBufferInfo;
-			stagingBufferInfo.sType		  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-			stagingBufferInfo.size		  = size;
-			stagingBufferInfo.usage		  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-			stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			stagingBufferInfo.flags		  = 0;
-			stagingBufferInfo.pNext		  = nullptr;
-
-			VmaAllocationCreateInfo stagingAllocatorInfo = {};
-			stagingAllocatorInfo.usage					 = VMA_MEMORY_USAGE_CPU_ONLY;
-			stagingAllocatorInfo.flags					 = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-
-			VkBuffer	  stagingBuffer;
-			VmaAllocation stagingAllocation;
-
-			vmaCreateBuffer(vmaAllocator, &stagingBufferInfo, &stagingAllocatorInfo, &stagingBuffer, &stagingAllocation,
-							nullptr);
+			Buffer stagingBuffer = allocate(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 
 			void *mappedData;
-			vmaMapMemory(vmaAllocator, stagingAllocation, &mappedData);
+			stagingBuffer.map(&mappedData);
 			memcpy(mappedData, data, size);
-			vmaUnmapMemory(vmaAllocator, stagingAllocation);
+			stagingBuffer.unmap();
 
-			VkBufferCreateInfo gpuBufferInfo;
-			gpuBufferInfo.sType		  = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-			gpuBufferInfo.size		  = size;
-			gpuBufferInfo.usage		  = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-			gpuBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			gpuBufferInfo.flags		  = 0;
-			gpuBufferInfo.pNext		  = nullptr;
-
-			VmaAllocationCreateInfo gpuAllocInfo = {
-				.usage = VMA_MEMORY_USAGE_GPU_ONLY // Allocates from DEVICE_LOCAL memory
-			};
-
-			vmaCreateBuffer(vmaAllocator, &gpuBufferInfo, &gpuAllocInfo, &buffer.buffer, &buffer.allocation, nullptr);
+			Buffer buffer = allocate(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+									 {.usage = VMA_MEMORY_USAGE_GPU_ONLY});
 
 			// copy
 			VkCommandBufferAllocateInfo allocInfo{};
@@ -237,7 +243,7 @@ class Allocator
 			copyRegion.srcOffset = 0; // Optional
 			copyRegion.dstOffset = 0; // Optional
 			copyRegion.size		 = size;
-			vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer.buffer, 1, &copyRegion);
+			vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, buffer.buffer, 1, &copyRegion);
 
 			vkEndCommandBuffer(commandBuffer);
 
@@ -251,28 +257,63 @@ class Allocator
 
 			vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 
-			vmaDestroyBuffer(vmaAllocator, stagingBuffer, stagingAllocation);
+			stagingBuffer.destroy();
 
 			return buffer;
 		}
 
-		Buffer allocate(int size, unsigned int usage, VkDevice device)
+		Buffer allocate(int size, unsigned int usage,
+						VmaAllocationCreateInfo allocatorInfo = {
+							.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+							.usage = VMA_MEMORY_USAGE_CPU_ONLY})
 		{
 			Buffer buffer;
+			buffer.allocator = &vmaAllocator;
 
 			VkBufferCreateInfo bufferInfo{};
 			bufferInfo.sType	   = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 			bufferInfo.size		   = size;
 			bufferInfo.usage	   = usage;
 			bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-			VmaAllocationCreateInfo allocatorInfo;
-			allocatorInfo.usage = VMA_MEMORY_USAGE_AUTO;
-			allocatorInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+			bufferInfo.flags	   = 0;
+			bufferInfo.pNext	   = nullptr;
 
 			vmaCreateBuffer(vmaAllocator, &bufferInfo, &allocatorInfo, &buffer.buffer, &buffer.allocation, nullptr);
 
 			return buffer;
+		}
+
+		Image createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling,
+						  VkImageUsageFlags		  usage,
+						  VmaAllocationCreateInfo allocatorInfo = {
+							  .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+							  .usage = VMA_MEMORY_USAGE_CPU_ONLY})
+		{
+			Image image;
+			image.allocator = &vmaAllocator;
+
+			VkImageCreateInfo imageInfo{};
+			imageInfo.sType			= VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+			imageInfo.imageType		= VK_IMAGE_TYPE_2D;
+			imageInfo.extent.width	= width;
+			imageInfo.extent.height = height;
+			imageInfo.extent.depth	= 1;
+			imageInfo.mipLevels		= 1;
+			imageInfo.arrayLayers	= 1;
+			imageInfo.format		= format;
+			imageInfo.tiling		= tiling;
+			imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			imageInfo.usage			= usage;
+			imageInfo.samples		= VK_SAMPLE_COUNT_1_BIT;
+			imageInfo.sharingMode	= VK_SHARING_MODE_EXCLUSIVE;
+
+			if (vmaCreateImage(vmaAllocator, &imageInfo, &allocatorInfo, &image.image, &image.allocation, nullptr) !=
+				VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create image!");
+			}
+
+			return image;
 		}
 
 		void free(Buffer buffer)
@@ -360,7 +401,7 @@ class VertexBuffer
 			vertexCount = vertices.size();
 
 			buffer = vmaAllocator.stageAllocate(sizeof(vertices[0]) * vertexCount, vertices.data(),
-												VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, commandPool, device, graphicsQueue);
+												VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, commandPool, graphicsQueue);
 		}
 
 		void destroy(Allocator allocator)
@@ -376,12 +417,66 @@ struct UniformBufferObject
 		glm::mat4 proj;
 };
 
+class Descriptor
+{
+	public:
+		VkDescriptorSet descriptorSets;
+
+		VkWriteDescriptorSet setupMeta(VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
+									   VkDevice device)
+		{
+			VkDescriptorSetLayout		layouts = descriptorSetLayout;
+			VkDescriptorSetAllocateInfo allocInfo{};
+			allocInfo.sType				 = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			allocInfo.descriptorPool	 = descriptorPool;
+			allocInfo.descriptorSetCount = 1;
+			allocInfo.pSetLayouts		 = &layouts;
+
+			if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSets) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to allocate descriptor sets!");
+			}
+
+			VkWriteDescriptorSet descriptorWrite;
+			descriptorWrite.sType			= VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrite.dstSet			= descriptorSets;
+			descriptorWrite.dstBinding		= 0;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = 1;
+
+			return descriptorWrite;
+		}
+
+		void setup(VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout, VkDevice device,
+				   VkDescriptorBufferInfo bufferInfo)
+		{
+			VkWriteDescriptorSet descriptorWrite = setupMeta(descriptorPool, descriptorSetLayout, device);
+			descriptorWrite.descriptorType		 = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			descriptorWrite.pBufferInfo			 = &bufferInfo;
+			descriptorWrite.pImageInfo			 = nullptr;
+			descriptorWrite.pTexelBufferView	 = nullptr;
+
+			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		}
+
+		void setup(VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout, VkDevice device,
+				   VkDescriptorImageInfo imageInfo)
+		{
+			VkWriteDescriptorSet descriptorWrite = setupMeta(descriptorPool, descriptorSetLayout, device);
+			descriptorWrite.descriptorType		 = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			descriptorWrite.pBufferInfo			 = nullptr;
+			descriptorWrite.pImageInfo			 = &imageInfo;
+			descriptorWrite.pTexelBufferView	 = nullptr;
+
+			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		}
+};
+
 class DescriptorBuffer
 {
 	public:
 		VkDescriptorSet descriptorSets;
-		VkBuffer		uniformBuffers;
-		VkDeviceMemory	uniformBuffersMemory;
+		Buffer			uniformBuffer;
 		void		   *uniformBuffersMapped;
 
 		VkDescriptorSet imageDescriptor;
@@ -389,55 +484,11 @@ class DescriptorBuffer
 		VkInstance		 &instance;
 		VkDevice		 &device;
 		VkPhysicalDevice &physicalDevice;
+		Allocator		 &allocator;
 
-		DescriptorBuffer(VkInstance &instance, VkDevice &device, VkPhysicalDevice &physicalDevice)
-			: instance(instance), device(device), physicalDevice(physicalDevice)
+		DescriptorBuffer(VkInstance &instance, VkDevice &device, VkPhysicalDevice &physicalDevice, Allocator &allocator)
+			: instance(instance), device(device), physicalDevice(physicalDevice), allocator(allocator)
 		{
-		}
-
-		uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
-		{
-			VkPhysicalDeviceMemoryProperties memProperties;
-			vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-			for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
-			{
-				if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
-				{
-					return i;
-				}
-			}
-
-			throw std::runtime_error("failed to find suitable memory type!");
-		}
-
-		void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
-						  VkBuffer &buffer, VkDeviceMemory &bufferMemory)
-		{
-			VkBufferCreateInfo bufferInfo{};
-			bufferInfo.sType	   = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-			bufferInfo.size		   = size;
-			bufferInfo.usage	   = usage;
-			bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-			if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to create buffer!");
-			}
-
-			VkMemoryRequirements memRequirements;
-			vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
-
-			VkMemoryAllocateInfo allocInfo{};
-			allocInfo.sType			  = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-			allocInfo.allocationSize  = memRequirements.size;
-			allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
-
-			if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to allocate buffer memory!");
-			}
-
-			vkBindBufferMemory(device, buffer, bufferMemory, 0);
 		}
 
 		void create(VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout,
@@ -446,11 +497,9 @@ class DescriptorBuffer
 			// UNIFORM
 			VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
-			createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-						 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffers,
-						 uniformBuffersMemory);
+			uniformBuffer = allocator.allocate(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
-			vkMapMemory(device, uniformBuffersMemory, 0, bufferSize, 0, &uniformBuffersMapped);
+			uniformBuffer.map(&uniformBuffersMapped);
 
 			// SET
 
@@ -483,7 +532,7 @@ class DescriptorBuffer
 
 			{
 				VkDescriptorBufferInfo bufferInfo{};
-				bufferInfo.buffer = uniformBuffers;
+				bufferInfo.buffer = uniformBuffer.buffer;
 				bufferInfo.offset = 0;
 				bufferInfo.range  = sizeof(UniformBufferObject);
 
@@ -521,8 +570,7 @@ class DescriptorBuffer
 
 		void destroy()
 		{
-			vkDestroyBuffer(device, uniformBuffers, nullptr);
-			vkFreeMemory(device, uniformBuffersMemory, nullptr);
+			uniformBuffer.destroy();
 		}
 
 		void update(UniformBufferObject ubo)
@@ -542,7 +590,8 @@ class HelloTriangleApplication
 			cleanup();
 		}
 		HelloTriangleApplication()
-			: descriptorBuffer(instance, device, physicalDevice), descriptorBuffer2(instance, device, physicalDevice)
+			: descriptorBuffer(instance, device, physicalDevice, vmaAllocator),
+			  descriptorBuffer2(instance, device, physicalDevice, vmaAllocator)
 		{
 		}
 
@@ -577,8 +626,7 @@ class HelloTriangleApplication
 		DescriptorBuffer descriptorBuffer;
 		DescriptorBuffer descriptorBuffer2;
 
-		VkImage				  textureImage;
-		VkDeviceMemory		  textureImageMemory;
+		Image				  textureImage;
 		VkImageView			  textureImageView;
 		VkSampler			  textureSampler;
 		VkDescriptorSetLayout textureLayout;
@@ -1152,10 +1200,10 @@ class HelloTriangleApplication
 			createGraphicsPipeline();
 			createFrameBuffers();
 			createCommandPool();
+			createVertexBuffer();
 			createTextureImage();
 			createTextureImageView();
 			createTextureSampler();
-			createVertexBuffer();
 			createDescriptorPool();
 			createDescriptorSets();
 			createCommandBuffer();
@@ -1199,7 +1247,7 @@ class HelloTriangleApplication
 
 		void createTextureImageView()
 		{
-			textureImageView = createImageView(textureImage, VK_FORMAT_R8G8B8A8_SRGB);
+			textureImageView = createImageView(textureImage.image, VK_FORMAT_R8G8B8A8_SRGB);
 		}
 
 		VkImageView createImageView(VkImage image, VkFormat format)
@@ -1235,34 +1283,28 @@ class HelloTriangleApplication
 				throw std::runtime_error("failed to load texture image!");
 			}
 
-			VkBuffer	   stagingBuffer;
-			VkDeviceMemory stagingBufferMemory;
-
-			createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-						 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer,
-						 stagingBufferMemory);
+			Buffer stagingBuffer = vmaAllocator.allocate(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 
 			void *data;
-			vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+			stagingBuffer.map(&data);
 			memcpy(data, pixels, static_cast<size_t>(imageSize));
-			vkUnmapMemory(device, stagingBufferMemory);
+			stagingBuffer.unmap();
 
 			stbi_image_free(pixels);
 
-			createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
-						VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-						VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
+			textureImage = vmaAllocator.createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+													VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+													{.usage = VMA_MEMORY_USAGE_GPU_ONLY});
 
-			transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED,
+			transitionImageLayout(textureImage.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED,
 								  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-			copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth),
+			copyBufferToImage(stagingBuffer.buffer, textureImage.image, static_cast<uint32_t>(texWidth),
 							  static_cast<uint32_t>(texHeight));
 
-			transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			transitionImageLayout(textureImage.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 								  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-			vkDestroyBuffer(device, stagingBuffer, nullptr);
-			vkFreeMemory(device, stagingBufferMemory, nullptr);
+			stagingBuffer.destroy();
 		}
 
 		VkCommandBuffer beginSingleTimeCommands()
@@ -2147,8 +2189,7 @@ class HelloTriangleApplication
 
 			vkDestroySampler(device, textureSampler, nullptr);
 			vkDestroyImageView(device, textureImageView, nullptr);
-			vkDestroyImage(device, textureImage, nullptr);
-			vkFreeMemory(device, textureImageMemory, nullptr);
+			textureImage.destroy();
 
 			descriptorBuffer.destroy();
 			descriptorBuffer2.destroy();
