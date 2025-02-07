@@ -3,3 +3,4 @@ VulkanMemoryAllocator
 bin
 build
 vcpkg
+src/stb_image.h
