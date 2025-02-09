@@ -4,6 +4,7 @@
 #include <glm/ext/matrix_transform.hpp>
 #include <limits>
 #include <map>
+#include <random>
 #include <set>
 #include <thread>
 #include <vector>
@@ -339,8 +340,8 @@ class Allocator
 			memcpy(mappedData, data, size);
 			stagingBuffer.unmap();
 
-			Buffer buffer = allocate(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-									 {.usage = VMA_MEMORY_USAGE_GPU_ONLY});
+			Buffer buffer =
+				allocate(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | BUFFER_USAGE, {.usage = VMA_MEMORY_USAGE_GPU_ONLY});
 
 			// copy
 			VkCommandBufferAllocateInfo allocInfo{};
@@ -555,8 +556,8 @@ class Window
 
 struct Vertex
 {
-		glm::vec3 pos;
-		glm::vec3 color;
+		glm::vec4 pos;
+		glm::vec4 color;
 
 		static VkVertexInputBindingDescription getBindingDescription()
 		{
@@ -874,8 +875,7 @@ class Instance
 													 {.usage = VMA_MEMORY_USAGE_GPU_ONLY});
 
 			// copy image from buffer
-			texture.image.copyFromBuffer(stagingBuffer, commandPool.commandPool, device,
-										transferQueue.queue);
+			texture.image.copyFromBuffer(stagingBuffer, commandPool.commandPool, device, transferQueue.queue);
 
 			// cleanup buffer
 			stagingBuffer.destroy();
@@ -928,12 +928,19 @@ class HelloTriangleApplication
 		VkPipeline				   graphicsPipeline;
 		std::vector<VkFramebuffer> swapChainFramebuffers;
 
+		Queue		computeQueue;
+		CommandPool computeCommandPool;
+		Command		computeCommandBuffers;
+
 		uint32_t imageIndex;
 
 		VkDescriptorPool descriptorPool;
 
 		VkDescriptorSetLayout textureLayout;
 		VkDescriptorSet		  textureSet;
+
+		VkDescriptorSetLayout compLayoutIn;
+		VkDescriptorSetLayout compLayoutOut;
 
 		Command		commandBuffers;
 		VkSemaphore imageAvailableSemaphores;
@@ -1685,14 +1692,15 @@ class HelloTriangleApplication
 			VkDescriptorPoolSize poolSize[] = {
 				{.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 2},
 				{.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1},
+				{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2},
 			};
 
 			VkDescriptorPoolCreateInfo poolInfo{};
 			poolInfo.sType		   = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-			poolInfo.poolSizeCount = 2;
+			poolInfo.poolSizeCount = 3;
 			poolInfo.pPoolSizes	   = poolSize;
 
-			poolInfo.maxSets = 3;
+			poolInfo.maxSets = 30;
 
 			if (vkCreateDescriptorPool(instance.device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
 			{
@@ -1700,44 +1708,32 @@ class HelloTriangleApplication
 			}
 		}
 
+		void layoutMaker9000(VkDescriptorSetLayout &layout, int binding, VkDescriptorType type,
+							 VkShaderStageFlags flags)
+		{
+			VkDescriptorSetLayoutBinding layoutBinding{};
+			layoutBinding.binding			 = binding;
+			layoutBinding.descriptorCount	 = 1;
+			layoutBinding.descriptorType	 = type;
+			layoutBinding.stageFlags		 = flags;
+			layoutBinding.pImmutableSamplers = nullptr;
+
+			VkDescriptorSetLayoutCreateInfo layoutInfo{};
+			layoutInfo.sType		= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+			layoutInfo.bindingCount = 1;
+			layoutInfo.pBindings	= &layoutBinding;
+			if (vkCreateDescriptorSetLayout(instance.device, &layoutInfo, nullptr, &layout) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create descriptor set layout!");
+			}
+		}
+
 		void createDescriptorSetLayout()
 		{
-			{
-				VkDescriptorSetLayoutBinding uboLayoutBinding{};
-				uboLayoutBinding.binding			= 0;
-				uboLayoutBinding.descriptorType		= VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-				uboLayoutBinding.descriptorCount	= 1;
-				uboLayoutBinding.stageFlags			= VK_SHADER_STAGE_VERTEX_BIT;
-				uboLayoutBinding.pImmutableSamplers = nullptr; // Optional
-
-				VkDescriptorSetLayoutCreateInfo layoutInfo{};
-				layoutInfo.sType		= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-				layoutInfo.bindingCount = 1;
-				layoutInfo.pBindings	= &uboLayoutBinding;
-				if (vkCreateDescriptorSetLayout(instance.device, &layoutInfo, nullptr, &descriptorSetLayout) !=
-					VK_SUCCESS)
-				{
-					throw std::runtime_error("failed to create descriptor set layout!");
-				}
-			}
-
-			{
-				VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-				samplerLayoutBinding.binding			= 0;
-				samplerLayoutBinding.descriptorCount	= 1;
-				samplerLayoutBinding.descriptorType		= VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-				samplerLayoutBinding.pImmutableSamplers = nullptr;
-				samplerLayoutBinding.stageFlags			= VK_SHADER_STAGE_FRAGMENT_BIT;
-
-				VkDescriptorSetLayoutCreateInfo layoutInfo{};
-				layoutInfo.sType		= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-				layoutInfo.bindingCount = 1;
-				layoutInfo.pBindings	= &samplerLayoutBinding;
-				if (vkCreateDescriptorSetLayout(instance.device, &layoutInfo, nullptr, &textureLayout) != VK_SUCCESS)
-				{
-					throw std::runtime_error("failed to create descriptor set layout!");
-				}
-			}
+			layoutMaker9000(descriptorSetLayout, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+			layoutMaker9000(textureLayout, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+			layoutMaker9000(compLayoutIn, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+			layoutMaker9000(compLayoutOut, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		}
 
 		void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
@@ -1873,13 +1869,16 @@ class HelloTriangleApplication
 
 		void createCommandBuffer()
 		{
-			commandBuffers = instance.commandPool.create();
+			commandBuffers		  = instance.commandPool.create();
+			computeCommandBuffers = computeCommandPool.create();
 		}
 
 		void createCommandPool()
 		{
 			instance.transferQueue = instance.createQueue(Queue::Type::TRANSFER);
 			instance.commandPool   = graphicsQueue.createCommandPool();
+			computeQueue		   = instance.createQueue(Queue::Type::COMPUTE);
+			computeCommandPool	   = computeQueue.createCommandPool();
 		}
 
 		void createFrameBuffers()
@@ -2171,18 +2170,84 @@ class HelloTriangleApplication
 
 		void mainLoop()
 		{
-			const std::vector<Vertex> triangleData = {{{0.0f, -1.f, 0}, {1.0f, 0.0f, 0.0f}},   //
-													  {{0.5f, 0.5f, 0}, {0.0f, 1.0f, 0.0f}},   //
-													  {{-0.5f, 0.5f, 0}, {0.0f, 0.0f, 1.0f}}}; //
-			const std::vector<Vertex> squareData   = {{{0.0f, 0.0f, 0}, {0.0f, 0.0f, 0.0f}},   //
-													  {{0.0f, 0.5f, 0}, {0.0f, 1.0f, 0.0f}},   //
-													  {{0.5f, 0.0f, 0}, {1.0f, 0.0f, 0.0f}},   //
-													  {{0.5f, 0.0f, 0}, {1.0f, 0.0f, 0.0f}},   //
-													  {{0.0f, 0.5f, 0}, {0.0f, 1.0f, 0.0f}},   //
-													  {{5.5f, 0.5f, 0}, {1.0f, 1.0f, 0.0f}}};  //
+			std::vector<Vertex> triangleData = {{{0.0f, -1.f, 0, 0}, {1.0f, 0.0f, 0.0f, 0}},   //
+													  {{0.5f, 0.5f, 0, 0}, {0.0f, 1.0f, 0.0f, 0}},   //
+													  {{-0.5f, 0.5f, 0, 0}, {0.0f, 0.0f, 1.0f, 0}}}; //
+			Buffer							shaderStorageBuffer1 = instance.vmaAllocator.stageAllocate(triangleData.size() * sizeof(Vertex), triangleData.data(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, instance.commandPool.commandPool, graphicsQueue.queue);
+			Buffer							shaderStorageBuffer2 = instance.vmaAllocator.allocate(triangleData.size() * sizeof(Vertex), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, {.flags=VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, .usage = VMA_MEMORY_USAGE_AUTO});
+
+			VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
+			auto							computeShader = readFile("compute.spv");
+			VkShaderModule					shader		  = createShaderModule(computeShader);
+			{
+
+				computeShaderStageInfo.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+				computeShaderStageInfo.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+				computeShaderStageInfo.module = shader;
+				computeShaderStageInfo.pName  = "main";
+			}
+
+			Descriptor compIn;
+			{
+				auto write = compIn.setupMeta(descriptorPool, compLayoutIn, instance.device, 0);
+
+				VkDescriptorBufferInfo bufferInfo;
+				bufferInfo.buffer = shaderStorageBuffer1.buffer;
+				bufferInfo.range  = sizeof(Vertex) * triangleData.size();
+				bufferInfo.offset = 0;
+
+				write.descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+				write.pBufferInfo	   = &bufferInfo;
+				write.pImageInfo	   = nullptr;
+				write.pTexelBufferView = nullptr;
+
+				vkUpdateDescriptorSets(instance.device, 1, &write, 0, nullptr);
+			}
+			Descriptor compOut;
+			{
+				auto write = compOut.setupMeta(descriptorPool, compLayoutOut, instance.device, 0);
+
+				VkDescriptorBufferInfo bufferInfo;
+				bufferInfo.buffer = shaderStorageBuffer2.buffer;
+				bufferInfo.range  = sizeof(Vertex) * triangleData.size();
+				bufferInfo.offset = 0;
+
+				write.descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+				write.pBufferInfo	   = &bufferInfo;
+				write.pImageInfo	   = nullptr;
+				write.pTexelBufferView = nullptr;
+
+				vkUpdateDescriptorSets(instance.device, 1, &write, 0, nullptr);
+			}
+
+			VkPipelineLayout computePipelineLayout;
+			VkPipeline		 computePipeline;
+			{
+				VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+				pipelineLayoutInfo.sType		  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+				pipelineLayoutInfo.setLayoutCount = 2;
+				std::array layout				  = {compLayoutIn, compLayoutOut};
+				pipelineLayoutInfo.pSetLayouts	  = layout.data();
+
+				if (vkCreatePipelineLayout(instance.device, &pipelineLayoutInfo, nullptr, &computePipelineLayout) !=
+					VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to create compute pipeline layout!");
+				}
+
+				VkComputePipelineCreateInfo pipelineInfo{};
+				pipelineInfo.sType	= VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+				pipelineInfo.layout = computePipelineLayout;
+				pipelineInfo.stage	= computeShaderStageInfo;
+
+				if (vkCreateComputePipelines(instance.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+											 &computePipeline) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to create compute pipeline!");
+				}
+			}
 
 			VertexBuffer triangle = instance.createVertexBuffer(triangleData);
-			VertexBuffer square	  = instance.createVertexBuffer(squareData);
 
 			UBO uniform = instance.createUBO<UniformBufferObject>(descriptorPool, descriptorSetLayout);
 
@@ -2215,11 +2280,41 @@ class HelloTriangleApplication
 					shift += 0.01;
 				}
 
-				UniformBufferObject ubo{};
-				ubo.model = glm::translate(glm::mat4(1.f), {400, 300, 0});
-				ubo.model = glm::scale(ubo.model, {100, 100, 1});
+				VkCommandBufferBeginInfo beginInfo{};
+				beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
-				ubo.model = glm::rotate(ubo.model, frame * glm::radians(1.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+				if (vkBeginCommandBuffer(computeCommandBuffers.buffer, &beginInfo) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to begin recording command buffer!");
+				}
+
+				vkCmdBindPipeline(computeCommandBuffers.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+				std::array desc = {compIn.descriptorSets, compOut.descriptorSets};
+				vkCmdBindDescriptorSets(computeCommandBuffers.buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+										computePipelineLayout, 0, 2, desc.data(), 0, 0);
+
+				vkCmdDispatch(computeCommandBuffers.buffer, 1, 1, 1);
+
+				if (vkEndCommandBuffer(computeCommandBuffers.buffer) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to record command buffer!");
+				}
+
+				VkSubmitInfo submitInfo{};
+				submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+				submitInfo.commandBufferCount = 1;
+				submitInfo.pCommandBuffers	  = &computeCommandBuffers.buffer;
+				if (vkQueueSubmit(computeQueue.queue, 1, &submitInfo, nullptr) != VK_SUCCESS)
+				{
+					throw std::runtime_error("failed to submit compute command buffer!");
+				}
+				vkQueueWaitIdle(computeQueue.queue);
+
+				UniformBufferObject ubo{};
+				ubo.model = glm::translate(glm::mat4(1.f), {0, 0, 0});
+				ubo.model = glm::scale(ubo.model, {1, 1, 1});
+
+				ubo.model = glm::rotate(ubo.model, frame * glm::radians(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 
 				ubo.view =
 					glm::lookAt(glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
@@ -2227,16 +2322,19 @@ class HelloTriangleApplication
 				ubo.proj = glm::perspective((float)glm::radians(45.0f),
 											(float)swapChainExtent.width / swapChainExtent.height, 0.1f, 100.0f);
 
-				ubo.proj = glm::ortho<float>(0, 800, 0, 600);
-
+				ubo.proj = glm::ortho<float>(-1, 1, -1, 1);
+/*ubo.proj = glm::mat4(1);*/
 				/*ubo.proj[1][1] *= -1;*/
 
 				/*ubo = UniformBufferObject();*/
 
 				uniform.update(ubo);
 
-				draw(triangle, {uniform.descriptor, texture.descriptor});
-				draw(square, {uniform.descriptor, texture.descriptor});
+				VertexBuffer vb;
+				vb.buffer.buffer = shaderStorageBuffer2.buffer;
+				vb.vertexCount = triangleData.size();
+				draw(vb, {uniform.descriptor, texture.descriptor});
+				/*draw(square, {uniform.descriptor, texture.descriptor});*/
 
 				endDraw();
 				auto end = std::chrono::system_clock::now();
@@ -2247,10 +2345,19 @@ class HelloTriangleApplication
 				frame++;
 			}
 
+			Vertex* map;
+			shaderStorageBuffer2.map((void**)&map);
+			for(int i = 0; i < 3; i++)
+			{
+				std::cout << map[i].pos.x << " " << map[i].pos.y << " " << map[i].pos.z << " " << map[i].pos.w << "\n";
+				std::cout << map[i].color.x << " " << map[i].color.y << " " << map[i].color.z << " " << map[i].color.w << "\n";
+				std::cout << "\n";
+			}
+
 			vkDeviceWaitIdle(instance.device);
 
 			instance.destroyUBO(uniform);
-			triangle.destroy(instance.vmaAllocator);
+			/*triangle.destroy(instance.vmaAllocator);*/
 		}
 
 		void draw(VertexBuffer vertexBuffer, std::vector<Descriptor> descriptors)
@@ -2332,7 +2439,7 @@ class HelloTriangleApplication
 			renderPassInfo.renderArea.offset = {0, 0};
 			renderPassInfo.renderArea.extent = swapChainExtent;
 
-			VkClearValue clearColor		   = {{{1.0f, 0.0f, 0.0f, 0.0f}}};
+			VkClearValue clearColor		   = {{{0.0f, 0.0f, 0.0f, 0.0f}}};
 			renderPassInfo.clearValueCount = 1;
 			renderPassInfo.pClearValues	   = &clearColor;
 
