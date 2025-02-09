@@ -1,6 +1,8 @@
 .cache/clangd/index
 VulkanMemoryAllocator
-bin
+bin/a
+bin/*.spv
+bin/*.jpg
 build
 vcpkg
 src/stb_image.h
