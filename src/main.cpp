@@ -4,7 +4,6 @@
 #include <glm/ext/matrix_transform.hpp>
 #include <limits>
 #include <map>
-#include <optional>
 #include <set>
 #include <thread>
 #include <vector>
@@ -32,7 +31,8 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
-#define PRINT(x) std::cout << x << '\n';
+#define PRINT(x) std::cout << "(" << __LINE__ << ") " << x << '\n';
+#define LOG(x)	 std::cout << "(" << __LINE__ << ") " << #x << ": " << x << '\n'
 
 // Vizium
 
@@ -72,86 +72,47 @@ void endSingleTimeCommands(VkCommandBuffer commandBuffer, VkCommandPool commandP
 	vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 }
 
-class Queue
-{
-	public:
-		VkQueue queue;
-
-		enum Type
-		{
-			GRAPHICS,
-			PRESENTATION,
-			COMPUTE,
-			TRANSFER,
-		};
-
-		void setup(VkPhysicalDevice physicalDevice, VkDevice device, VkSurfaceKHR surface, Type type)
-		{
-			uint32_t queueFamilyCount;
-			vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
-			std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-			vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
-
-			uint32_t i = 0;
-			for (auto &family : queueFamilies)
-			{
-				if (type == Type::GRAPHICS)
-				{
-					if (family.queueFlags & VK_QUEUE_GRAPHICS_BIT)
-					{
-						break;
-					}
-				}
-				else if (type == Type::PRESENTATION)
-				{
-					VkBool32 presentSupport = false;
-					vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, surface, &presentSupport);
-
-					if (presentSupport)
-					{
-						break;
-					}
-				}
-				else if (type == Type::COMPUTE)
-				{
-					if (family.queueFlags & VK_QUEUE_COMPUTE_BIT)
-					{
-						break;
-					}
-				}
-
-				i++;
-			}
-
-			vkGetDeviceQueue(device, i, 0, &queue);
-		}
-};
-
 class Command
 {
 	public:
 		VkCommandBuffer buffer;
+		VkQueue			queue;
+		VkDevice		device;
+		VkCommandPool	pool;
+
+		void beginOneTime()
+		{
+			VkCommandBufferBeginInfo beginInfo{};
+			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+			vkBeginCommandBuffer(buffer, &beginInfo);
+		}
+
+		void submit(VkSemaphore semaphores = nullptr, VkPipelineStageFlags flags = 0)
+		{
+			vkEndCommandBuffer(buffer);
+
+			VkSubmitInfo submitInfo{};
+			submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			submitInfo.commandBufferCount = 1;
+			submitInfo.pCommandBuffers	  = &buffer;
+
+			vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+			vkQueueWaitIdle(queue);
+
+			vkFreeCommandBuffers(device, pool, 1, &buffer);
+		}
 };
 
 class CommandPool
 {
 	public:
 		VkCommandPool commandPool;
+		VkQueue		  queue;
+		VkDevice	  device;
 
-		void setup(VkDevice device, uint32_t graphicsFamilyIndex)
-		{
-			VkCommandPoolCreateInfo poolInfo{};
-			poolInfo.sType			  = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-			poolInfo.flags			  = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-			poolInfo.queueFamilyIndex = graphicsFamilyIndex;
-
-			if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to create command pool!");
-			}
-		}
-
-		Command allocate(VkDevice device)
+		Command create()
 		{
 			Command command;
 
@@ -169,7 +130,7 @@ class CommandPool
 			return command;
 		}
 
-		void free(Command command, VkQueue queue, VkDevice device)
+		void destroy(Command command)
 		{
 			vkEndCommandBuffer(command.buffer);
 
@@ -182,6 +143,42 @@ class CommandPool
 			vkQueueWaitIdle(queue);
 
 			vkFreeCommandBuffers(device, commandPool, 1, &command.buffer);
+		}
+};
+
+class Queue
+{
+	public:
+		VkQueue	 queue;
+		uint32_t index;
+		VkDevice device;
+
+		enum Type
+		{
+			GRAPHICS,
+			PRESENTATION,
+			COMPUTE,
+			TRANSFER,
+		};
+
+		CommandPool createCommandPool()
+		{
+			CommandPool pool;
+
+			pool.device = device;
+			pool.queue	= queue;
+
+			VkCommandPoolCreateInfo poolInfo{};
+			poolInfo.sType			  = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+			poolInfo.flags			  = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+			poolInfo.queueFamilyIndex = index;
+
+			if (vkCreateCommandPool(device, &poolInfo, nullptr, &pool.commandPool) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create command pool!");
+			}
+
+			return pool;
 		}
 };
 
@@ -556,25 +553,6 @@ class Window
 		}
 };
 
-class Instance
-{
-	public:
-		VkInstance				 instance;
-		VkDebugUtilsMessengerEXT debugMessenger;
-		VkPhysicalDevice		 physicalDevice = VK_NULL_HANDLE;
-		VkDevice				 device;
-
-		Instance()
-		{
-
-		}
-};
-
-class Pipeline
-{
-	public:
-};
-
 struct Vertex
 {
 		glm::vec3 pos;
@@ -613,15 +591,6 @@ class VertexBuffer
 	public:
 		Buffer buffer;
 		int	   vertexCount;
-
-		void create(VkQueue graphicsQueue, VkCommandPool commandPool, VkPhysicalDevice physicalDevice, VkDevice device,
-					VkInstance instance, Allocator vmaAllocator, std::vector<Vertex> vertices)
-		{
-			vertexCount = vertices.size();
-
-			buffer = vmaAllocator.stageAllocate(sizeof(vertices[0]) * vertexCount, vertices.data(),
-												VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, commandPool, graphicsQueue);
-		}
 
 		void destroy(Allocator allocator)
 		{
@@ -701,6 +670,26 @@ class Descriptor
 			descriptorWrite.pTexelBufferView = nullptr;
 
 			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		}
+};
+
+class Texture
+{
+	public:
+		Image	   image;
+		Descriptor descriptor;
+};
+
+class UBO
+{
+	public:
+		Buffer	   buffer;
+		Descriptor descriptor;
+		void	  *map;
+
+		template <typename T> void update(T data)
+		{
+			memcpy(map, &data, sizeof(T));
 		}
 };
 
@@ -812,6 +801,102 @@ class DescriptorBuffer
 		}
 };
 
+typedef std::map<Queue::Type, uint32_t> QueueMap;
+
+class Instance
+{
+	public:
+		VkInstance				 instance;
+		VkDebugUtilsMessengerEXT debugMessenger;
+		VkPhysicalDevice		 physicalDevice = VK_NULL_HANDLE;
+		VkDevice				 device;
+		QueueMap				 queueMap;
+		std::vector<uint32_t>	 uniqueQueues;
+		CommandPool				 commandPool;
+		Queue					 transferQueue;
+
+		Allocator vmaAllocator;
+
+		Instance()
+		{
+		}
+
+		Queue createQueue(Queue::Type type)
+		{
+			Queue q;
+			q.index	 = queueMap[type];
+			q.device = device;
+
+			vkGetDeviceQueue(device, q.index, 0, &q.queue);
+
+			return q;
+		}
+
+		VertexBuffer createVertexBuffer(std::vector<Vertex> data)
+		{
+			VertexBuffer vertexBuffer;
+
+			vertexBuffer.vertexCount = data.size();
+
+			vertexBuffer.buffer = vmaAllocator.stageAllocate(sizeof(data[0]) * data.size(), data.data(),
+															 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, commandPool.commandPool,
+															 transferQueue.queue);
+
+			return vertexBuffer;
+		}
+
+		template <typename T> UBO createUBO(VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout)
+		{
+			UBO ubo;
+			ubo.buffer = vmaAllocator.allocate(sizeof(T), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+			ubo.buffer.map(&ubo.map);
+
+			ubo.descriptor.setup(descriptorPool, descriptorSetLayout, device, ubo.buffer, sizeof(T), 0);
+
+			return ubo;
+		}
+
+		Texture createTexture(int width, int height, void *data, VkDescriptorPool pool, VkDescriptorSetLayout layout)
+		{
+			Texture texture;
+
+			// make staging buffer
+			Buffer stagingBuffer = vmaAllocator.allocate(width * height * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+
+			void *map;
+			stagingBuffer.map(&map);
+			memcpy(map, data, static_cast<size_t>(width * height * 4));
+			stagingBuffer.unmap();
+
+			// allocate space for image
+			texture.image = vmaAllocator.createImage(width, height, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+													 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+													 {.usage = VMA_MEMORY_USAGE_GPU_ONLY});
+
+			// copy image from buffer
+			texture.image.copyFromBuffer(stagingBuffer, commandPool.commandPool, device,
+										transferQueue.queue);
+
+			// cleanup buffer
+			stagingBuffer.destroy();
+
+			texture.descriptor.setup(pool, layout, device, texture.image, 0);
+
+			return texture;
+		}
+
+		void destroyUBO(UBO &ubo)
+		{
+			ubo.buffer.unmap();
+			ubo.buffer.destroy();
+		}
+};
+
+class Pipeline
+{
+	public:
+};
+
 class HelloTriangleApplication
 {
 	public:
@@ -828,10 +913,10 @@ class HelloTriangleApplication
 
 	private:
 		Window					   window;
-		Instance instance;
-		VkQueue					   graphicsQueue;
+		Instance				   instance;
+		Queue					   graphicsQueue;
+		Queue					   presentQueue;
 		VkSurfaceKHR			   surface;
-		VkQueue					   presentQueue;
 		VkSwapchainKHR			   swapChain;
 		std::vector<VkImage>	   swapChainImages;
 		VkFormat				   swapChainImageFormat;
@@ -842,21 +927,18 @@ class HelloTriangleApplication
 		VkRenderPass			   renderPass;
 		VkPipeline				   graphicsPipeline;
 		std::vector<VkFramebuffer> swapChainFramebuffers;
-		VkCommandPool			   commandPool;
 
 		uint32_t imageIndex;
-
-		Allocator vmaAllocator;
 
 		VkDescriptorPool descriptorPool;
 
 		VkDescriptorSetLayout textureLayout;
 		VkDescriptorSet		  textureSet;
 
-		VkCommandBuffer commandBuffers;
-		VkSemaphore		imageAvailableSemaphores;
-		VkSemaphore		renderFinishedSemaphores;
-		VkFence			inFlightFences;
+		Command		commandBuffers;
+		VkSemaphore imageAvailableSemaphores;
+		VkSemaphore renderFinishedSemaphores;
+		VkFence		inFlightFences;
 
 		uint32_t currentFrame = 0;
 
@@ -1026,7 +1108,8 @@ class HelloTriangleApplication
 			VkDebugUtilsMessengerCreateInfoEXT createInfo{};
 			populateDebugMessengerCreateInfo(createInfo);
 
-			if (CreateDebugUtilsMessengerEXT(instance.instance, &createInfo, nullptr, &instance.debugMessenger) != VK_SUCCESS)
+			if (CreateDebugUtilsMessengerEXT(instance.instance, &createInfo, nullptr, &instance.debugMessenger) !=
+				VK_SUCCESS)
 			{
 				throw std::runtime_error("failed to set up debug messenger!");
 			}
@@ -1079,8 +1162,7 @@ class HelloTriangleApplication
 			// Maximum possible size of textures affects graphics quality
 			score += deviceProperties.limits.maxImageDimension2D;
 
-			QueueFamilyIndices indices			   = findQueueFamilies(device);
-			bool			   extensionsSupported = checkDeviceExtensionSupport(device);
+			bool extensionsSupported = checkDeviceExtensionSupport(device);
 
 			bool swapChainAdequate = false;
 			if (extensionsSupported)
@@ -1089,8 +1171,19 @@ class HelloTriangleApplication
 				swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
 			}
 
+			QueueMap map = findQueueFamilies(device);
+
+			bool hasGraphicsQueue = map.find(Queue::Type::GRAPHICS) != instance.queueMap.end();
+			bool hasPresentQueue  = map.find(Queue::Type::PRESENTATION) != instance.queueMap.end();
+			bool hasTransferQueue = map.find(Queue::Type::TRANSFER) != instance.queueMap.end();
+
+			LOG(hasGraphicsQueue);
+			LOG(hasPresentQueue);
+			LOG(hasTransferQueue);
+
 			// Application can't function without geometry shaders
-			if (!deviceFeatures.geometryShader || !indices.isComplete() || !swapChainAdequate)
+			if (!deviceFeatures.geometryShader || !hasGraphicsQueue || !hasPresentQueue || !hasTransferQueue ||
+				!swapChainAdequate)
 			{
 				return 0;
 			}
@@ -1165,34 +1258,31 @@ class HelloTriangleApplication
 			return requiredExtensions.empty();
 		}
 
-		struct QueueFamilyIndices
+		QueueMap findQueueFamilies(VkPhysicalDevice device)
 		{
-				std::optional<uint32_t> graphicsFamily;
-				std::optional<uint32_t> presentFamily;
-
-				bool isComplete()
-				{
-					return graphicsFamily.has_value() && presentFamily.has_value();
-				}
-		};
-
-		QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device)
-		{
-			QueueFamilyIndices indices;
 			// Assign index to queue families that could be found
-
 			uint32_t queueFamilyCount = 0;
 			vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
 
 			std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
 			vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
 
+			QueueMap map;
+
 			int i = 0;
 			for (const auto &queueFamily : queueFamilies)
 			{
 				if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT)
 				{
-					indices.graphicsFamily = i;
+					map[Queue::Type::GRAPHICS] = i;
+				}
+				if (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT)
+				{
+					map[Queue::Type::GRAPHICS] = i;
+				}
+				if (queueFamily.queueFlags & VK_QUEUE_TRANSFER_BIT)
+				{
+					map[Queue::Type::TRANSFER] = i;
 				}
 
 				VkBool32 presentSupport = false;
@@ -1200,13 +1290,13 @@ class HelloTriangleApplication
 
 				if (presentSupport)
 				{
-					indices.presentFamily = i;
+					instance.queueMap[Queue::Type::PRESENTATION] = i;
 				}
 
 				i++;
 			}
 
-			return indices;
+			return map;
 		}
 
 		void pickPhysicalDevice()
@@ -1236,6 +1326,7 @@ class HelloTriangleApplication
 			if (candidates.rbegin()->first > 0)
 			{
 				instance.physicalDevice = candidates.rbegin()->second;
+				instance.queueMap		= findQueueFamilies(instance.physicalDevice);
 			}
 			else
 			{
@@ -1280,17 +1371,25 @@ class HelloTriangleApplication
 
 		void createLogicalDevice()
 		{
-			QueueFamilyIndices indices = findQueueFamilies(instance.physicalDevice);
-
 			std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-			std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+
+			std::set<uint32_t> unique;
+			for (auto &key : instance.queueMap)
+			{
+				unique.insert(key.second);
+			}
+
+			for (auto e : unique)
+			{
+				instance.uniqueQueues.push_back(e);
+			}
 
 			float queuePriority = 1.0f;
-			for (uint32_t queueFamily : uniqueQueueFamilies)
+			for (auto &uniqueQueueFamily : instance.uniqueQueues)
 			{
 				VkDeviceQueueCreateInfo queueCreateInfo{};
 				queueCreateInfo.sType			 = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-				queueCreateInfo.queueFamilyIndex = queueFamily;
+				queueCreateInfo.queueFamilyIndex = uniqueQueueFamily;
 				queueCreateInfo.queueCount		 = 1;
 				queueCreateInfo.pQueuePriorities = &queuePriority;
 				queueCreateInfos.push_back(queueCreateInfo);
@@ -1326,8 +1425,8 @@ class HelloTriangleApplication
 				throw std::runtime_error("failed to create logical device!");
 			}
 
-			vkGetDeviceQueue(instance.device, indices.graphicsFamily.value(), 0, &graphicsQueue);
-			vkGetDeviceQueue(instance.device, indices.presentFamily.value(), 0, &presentQueue);
+			graphicsQueue = instance.createQueue(Queue::Type::GRAPHICS);
+			presentQueue  = instance.createQueue(Queue::Type::GRAPHICS);
 		}
 
 		void createSwapChain()
@@ -1357,14 +1456,11 @@ class HelloTriangleApplication
 			createInfo.imageArrayLayers = 1;
 			createInfo.imageUsage		= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
-			QueueFamilyIndices indices				= findQueueFamilies(instance.physicalDevice);
-			uint32_t		   queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
-
-			if (indices.graphicsFamily != indices.presentFamily)
+			if (instance.uniqueQueues.size() > 1)
 			{
 				createInfo.imageSharingMode		 = VK_SHARING_MODE_CONCURRENT;
-				createInfo.queueFamilyIndexCount = 2;
-				createInfo.pQueueFamilyIndices	 = queueFamilyIndices;
+				createInfo.queueFamilyIndexCount = instance.uniqueQueues.size();
+				createInfo.pQueueFamilyIndices	 = instance.uniqueQueues.data();
 			}
 			else
 			{
@@ -1396,26 +1492,38 @@ class HelloTriangleApplication
 
 		void initVulkan()
 		{
+			PRINT("test");
 			createInstance();
 			setupDebugMessenger();
 			createSurface();
+			PRINT("test");
 			pickPhysicalDevice();
 			createLogicalDevice();
 			createSwapChain();
 			createImageViews();
 			createRenderPass();
+			PRINT("test");
 			createDescriptorSetLayout();
+			PRINT("test");
 			createGraphicsPipeline();
+			PRINT("test");
 			createFrameBuffers();
+			PRINT("test");
 			createCommandPool();
+			PRINT("test");
 			createVertexBuffer();
+			PRINT("test");
 			createTextureImage();
 			createTextureImageView();
 			createTextureSampler();
 			createDescriptorPool();
+			PRINT("test");
 			createDescriptorSets();
+			PRINT("test");
 			createCommandBuffer();
+			PRINT("test");
 			createSyncObjects();
+			PRINT("test");
 		}
 
 		void createTextureSampler()
@@ -1606,7 +1714,8 @@ class HelloTriangleApplication
 				layoutInfo.sType		= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 				layoutInfo.bindingCount = 1;
 				layoutInfo.pBindings	= &uboLayoutBinding;
-				if (vkCreateDescriptorSetLayout(instance.device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS)
+				if (vkCreateDescriptorSetLayout(instance.device, &layoutInfo, nullptr, &descriptorSetLayout) !=
+					VK_SUCCESS)
 				{
 					throw std::runtime_error("failed to create descriptor set layout!");
 				}
@@ -1663,7 +1772,7 @@ class HelloTriangleApplication
 
 		void createVertexBuffer()
 		{
-			vmaAllocator.setup(instance.physicalDevice, instance.device, instance.instance);
+			instance.vmaAllocator.setup(instance.physicalDevice, instance.device, instance.instance);
 
 			/*square.create(graphicsQueue, commandPool, physicalDevice, device,
 			 * instance, vmaAllocator, squareData);*/
@@ -1762,113 +1871,15 @@ class HelloTriangleApplication
 			vkCmdDraw(commandBuffer, buffer.vertexCount, 1, 0, 0);
 		}
 
-		void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
-		{
-			static int frame = 0;
-			frame++;
-
-			VkCommandBufferBeginInfo beginInfo{};
-			beginInfo.sType			   = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			beginInfo.flags			   = 0;		  // Optional
-			beginInfo.pInheritanceInfo = nullptr; // Optional
-
-			if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to begin recording command buffer!");
-			}
-
-			VkRenderPassBeginInfo renderPassInfo{};
-			renderPassInfo.sType	   = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-			renderPassInfo.renderPass  = renderPass;
-			renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
-
-			renderPassInfo.renderArea.offset = {0, 0};
-			renderPassInfo.renderArea.extent = swapChainExtent;
-
-			VkClearValue clearColor		   = {{{1.0f, 0.0f, 0.0f, 0.0f}}};
-			renderPassInfo.clearValueCount = 1;
-			renderPassInfo.pClearValues	   = &clearColor;
-
-			vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-
-			/*{*/
-			/*	UniformBufferObject ubo{};*/
-			/*	ubo.model = glm::translate(glm::mat4(1.f), {0, -0, 0});*/
-			/*	ubo.model = glm::scale(ubo.model, {1, 1, 1});*/
-			/**/
-			/*	ubo.model = glm::rotate(ubo.model, frame * glm::radians(1.0f),
-			 * glm::vec3(0.0f, 0.0f, 1.0f));*/
-			/**/
-			/*	ubo.view =*/
-			/*		glm::lookAt(glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, 0.0f,
-			 * 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));*/
-			/**/
-			/*	ubo.proj = glm::perspective((float)glm::radians(45.0f),*/
-			/*								(float)swapChainExtent.width
-			 * / swapChainExtent.height, 0.1f, 100.0f);*/
-			/**/
-			/*	ubo.proj[1][1] *= -1;*/
-			/**/
-			/*	descriptorBuffer.update(ubo);*/
-			/*	cmddraw(triangle, commandBuffer, descriptorBuffer);*/
-			/**/
-			/*	ubo.model = glm::translate(glm::mat4(1.f), {0, 0, 0});*/
-			/**/
-			/*	ubo.model = glm::rotate(ubo.model, frame * glm::radians(1.0f),
-			 * glm::vec3(0.0f, 0.0f, 1.0f));*/
-			/**/
-			/*	ubo.view = glm::lookAt(glm::vec3(0.0f, -0.0f, 20.0f), glm::vec3(0.0f,
-			 * 0.0f, 0.0f),*/
-			/*						   glm::vec3(0.0f, 1.0f,
-			 * 0.0f));*/
-			/**/
-			/*	ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width /
-			 * (float)swapChainExtent.height,*/
-			/*								0.1f, 100.0f);*/
-			/**/
-			/*	ubo.proj[1][1] *= -1;*/
-			/**/
-			/*	descriptorBuffer2.update(ubo);*/
-			/* cmddraw(square, commandBuffer, descriptorBuffer2);*/
-			/*}*/
-
-			vkCmdEndRenderPass(commandBuffer);
-
-			if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to record command buffer!");
-			}
-		}
-
 		void createCommandBuffer()
 		{
-			VkCommandBufferAllocateInfo allocInfo{};
-			allocInfo.sType				 = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-			allocInfo.commandPool		 = commandPool;
-			allocInfo.level				 = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-			allocInfo.commandBufferCount = 1;
-
-			if (vkAllocateCommandBuffers(instance.device, &allocInfo, &commandBuffers) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to allocate command buffers!");
-			}
+			commandBuffers = instance.commandPool.create();
 		}
 
 		void createCommandPool()
 		{
-			QueueFamilyIndices queueFamilyIndices = findQueueFamilies(instance.physicalDevice);
-
-			VkCommandPoolCreateInfo poolInfo{};
-			poolInfo.sType			  = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-			poolInfo.flags			  = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-			poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
-
-			if (vkCreateCommandPool(instance.device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to create command pool!");
-			}
+			instance.transferQueue = instance.createQueue(Queue::Type::TRANSFER);
+			instance.commandPool   = graphicsQueue.createCommandPool();
 		}
 
 		void createFrameBuffers()
@@ -1888,7 +1899,8 @@ class HelloTriangleApplication
 				framebufferInfo.height			= swapChainExtent.height;
 				framebufferInfo.layers			= 1;
 
-				if (vkCreateFramebuffer(instance.device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS)
+				if (vkCreateFramebuffer(instance.device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) !=
+					VK_SUCCESS)
 				{
 					throw std::runtime_error("failed to create framebuffer!");
 				}
@@ -2142,8 +2154,8 @@ class HelloTriangleApplication
 			pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
 			pipelineInfo.basePipelineIndex	= -1;			  // Optional
 
-			if (vkCreateGraphicsPipelines(instance.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) !=
-				VK_SUCCESS)
+			if (vkCreateGraphicsPipelines(instance.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+										  &graphicsPipeline) != VK_SUCCESS)
 			{
 				throw std::runtime_error("failed to create graphics pipeline!");
 			}
@@ -2168,21 +2180,11 @@ class HelloTriangleApplication
 													  {{0.5f, 0.0f, 0}, {1.0f, 0.0f, 0.0f}},   //
 													  {{0.0f, 0.5f, 0}, {0.0f, 1.0f, 0.0f}},   //
 													  {{5.5f, 0.5f, 0}, {1.0f, 1.0f, 0.0f}}};  //
-			VertexBuffer			  triangle;
-			triangle.create(graphicsQueue, commandPool, instance.physicalDevice, instance.device, instance.instance, vmaAllocator, triangleData);
-			VertexBuffer square;
-			square.create(graphicsQueue, commandPool, instance.physicalDevice, instance.device, instance.instance, vmaAllocator, squareData);
 
-			Buffer uniform = vmaAllocator.allocate(sizeof(UniformBufferObject), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-			void  *dataMap;
-			uniform.map(&dataMap);
+			VertexBuffer triangle = instance.createVertexBuffer(triangleData);
+			VertexBuffer square	  = instance.createVertexBuffer(squareData);
 
-			Descriptor uniformDescriptor;
-			uniformDescriptor.setup(descriptorPool, descriptorSetLayout, instance.device, uniform, sizeof(UniformBufferObject),
-									0);
-
-			// create image
-			Image textureImage;
+			UBO uniform = instance.createUBO<UniformBufferObject>(descriptorPool, descriptorSetLayout);
 
 			// load image from file
 			int			 texWidth, texHeight, texChannels;
@@ -2194,29 +2196,7 @@ class HelloTriangleApplication
 				throw std::runtime_error("failed to load texture image!");
 			}
 
-			// make staging buffer
-			Buffer stagingBuffer = vmaAllocator.allocate(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-
-			void *data;
-			stagingBuffer.map(&data);
-			memcpy(data, pixels, static_cast<size_t>(imageSize));
-			stagingBuffer.unmap();
-
-			stbi_image_free(pixels);
-
-			// allocate space for image
-			textureImage = vmaAllocator.createImage(
-				texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
-				VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, {.usage = VMA_MEMORY_USAGE_GPU_ONLY});
-
-			// copy image from buffer
-			textureImage.copyFromBuffer(stagingBuffer, commandPool, instance.device, graphicsQueue);
-
-			// cleanup buffer
-			stagingBuffer.destroy();
-
-			Descriptor textureDescriptor;
-			textureDescriptor.setup(descriptorPool, textureLayout, instance.device, textureImage, 0);
+			Texture texture = instance.createTexture(texWidth, texHeight, pixels, descriptorPool, textureLayout);
 
 			int frame = 0;
 
@@ -2230,13 +2210,13 @@ class HelloTriangleApplication
 
 				static float shift = 0;
 
-				if(glfwGetKey(window.window, GLFW_KEY_SPACE))
+				if (glfwGetKey(window.window, GLFW_KEY_SPACE))
 				{
 					shift += 0.01;
 				}
 
 				UniformBufferObject ubo{};
-				ubo.model = glm::translate(glm::mat4(1.f), {0, shift, 0});
+				ubo.model = glm::translate(glm::mat4(1.f), {400, 300, 0});
 				ubo.model = glm::scale(ubo.model, {100, 100, 1});
 
 				ubo.model = glm::rotate(ubo.model, frame * glm::radians(1.0f), glm::vec3(0.0f, 0.0f, 1.0f));
@@ -2253,13 +2233,10 @@ class HelloTriangleApplication
 
 				/*ubo = UniformBufferObject();*/
 
-				memcpy(dataMap, &ubo, sizeof(UniformBufferObject));
+				uniform.update(ubo);
 
-				draw(triangle, {uniformDescriptor, textureDescriptor});
-
-				memcpy(dataMap, &ubo, sizeof(UniformBufferObject));
-
-				draw(square, {uniformDescriptor, textureDescriptor});
+				draw(triangle, {uniform.descriptor, texture.descriptor});
+				draw(square, {uniform.descriptor, texture.descriptor});
 
 				endDraw();
 				auto end = std::chrono::system_clock::now();
@@ -2272,15 +2249,13 @@ class HelloTriangleApplication
 
 			vkDeviceWaitIdle(instance.device);
 
-			uniform.unmap();
-			uniform.destroy();
-			textureImage.destroy(instance.device);
-			triangle.destroy(vmaAllocator);
+			instance.destroyUBO(uniform);
+			triangle.destroy(instance.vmaAllocator);
 		}
 
 		void draw(VertexBuffer vertexBuffer, std::vector<Descriptor> descriptors)
 		{
-			vkCmdBindPipeline(commandBuffers, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+			vkCmdBindPipeline(commandBuffers.buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
 			VkViewport viewport{};
 			viewport.x		  = 0.0f;
@@ -2289,16 +2264,16 @@ class HelloTriangleApplication
 			viewport.height	  = static_cast<float>(swapChainExtent.height);
 			viewport.minDepth = 0.0f;
 			viewport.maxDepth = 1.0f;
-			vkCmdSetViewport(commandBuffers, 0, 1, &viewport);
+			vkCmdSetViewport(commandBuffers.buffer, 0, 1, &viewport);
 
 			VkRect2D scissor{};
 			scissor.offset = {0, 0};
 			scissor.extent = swapChainExtent;
-			vkCmdSetScissor(commandBuffers, 0, 1, &scissor);
+			vkCmdSetScissor(commandBuffers.buffer, 0, 1, &scissor);
 
 			VkBuffer	 vertexBuffers[] = {vertexBuffer.buffer.buffer};
 			VkDeviceSize offsets[]		 = {0};
-			vkCmdBindVertexBuffers(commandBuffers, 0, 1, vertexBuffers, offsets);
+			vkCmdBindVertexBuffers(commandBuffers.buffer, 0, 1, vertexBuffers, offsets);
 
 			std::vector<VkDescriptorSet> sets(descriptors.size());
 			int							 i = 0;
@@ -2308,10 +2283,10 @@ class HelloTriangleApplication
 				i++;
 			}
 
-			vkCmdBindDescriptorSets(commandBuffers, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, sets.size(),
-									sets.data(), 0, nullptr);
+			vkCmdBindDescriptorSets(commandBuffers.buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0,
+									sets.size(), sets.data(), 0, nullptr);
 
-			vkCmdDraw(commandBuffers, vertexBuffer.vertexCount, 1, 0, 0);
+			vkCmdDraw(commandBuffers.buffer, vertexBuffer.vertexCount, 1, 0, 0);
 		}
 
 		void startDraw()
@@ -2334,7 +2309,7 @@ class HelloTriangleApplication
 
 			vkResetFences(instance.device, 1, &inFlightFences);
 
-			vkResetCommandBuffer(commandBuffers, 0);
+			vkResetCommandBuffer(commandBuffers.buffer, 0);
 
 			static int frame = 0;
 			frame++;
@@ -2344,7 +2319,7 @@ class HelloTriangleApplication
 			beginInfo.flags			   = 0;		  // Optional
 			beginInfo.pInheritanceInfo = nullptr; // Optional
 
-			if (vkBeginCommandBuffer(commandBuffers, &beginInfo) != VK_SUCCESS)
+			if (vkBeginCommandBuffer(commandBuffers.buffer, &beginInfo) != VK_SUCCESS)
 			{
 				throw std::runtime_error("failed to begin recording command buffer!");
 			}
@@ -2361,14 +2336,14 @@ class HelloTriangleApplication
 			renderPassInfo.clearValueCount = 1;
 			renderPassInfo.pClearValues	   = &clearColor;
 
-			vkCmdBeginRenderPass(commandBuffers, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+			vkCmdBeginRenderPass(commandBuffers.buffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 		}
 
 		void endDraw()
 		{
-			vkCmdEndRenderPass(commandBuffers);
+			vkCmdEndRenderPass(commandBuffers.buffer);
 
-			if (vkEndCommandBuffer(commandBuffers) != VK_SUCCESS)
+			if (vkEndCommandBuffer(commandBuffers.buffer) != VK_SUCCESS)
 			{
 				throw std::runtime_error("failed to record command buffer!");
 			}
@@ -2383,13 +2358,13 @@ class HelloTriangleApplication
 			submitInfo.pWaitDstStageMask		  = waitStages;
 
 			submitInfo.commandBufferCount = 1;
-			submitInfo.pCommandBuffers	  = &commandBuffers;
+			submitInfo.pCommandBuffers	  = &commandBuffers.buffer;
 
 			VkSemaphore signalSemaphores[]	= {renderFinishedSemaphores};
 			submitInfo.signalSemaphoreCount = 1;
 			submitInfo.pSignalSemaphores	= signalSemaphores;
 
-			if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences) != VK_SUCCESS)
+			if (vkQueueSubmit(graphicsQueue.queue, 1, &submitInfo, inFlightFences) != VK_SUCCESS)
 			{
 				throw std::runtime_error("failed to submit draw command buffer!");
 			}
@@ -2407,7 +2382,7 @@ class HelloTriangleApplication
 
 			presentInfo.pResults = nullptr; // optional
 
-			VkResult result = vkQueuePresentKHR(presentQueue, &presentInfo);
+			VkResult result = vkQueuePresentKHR(presentQueue.queue, &presentInfo);
 
 			if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || window.framebufferResized)
 			{
@@ -2430,13 +2405,13 @@ class HelloTriangleApplication
 			vkDestroyDescriptorSetLayout(instance.device, descriptorSetLayout, nullptr);
 			vkDestroyDescriptorSetLayout(instance.device, textureLayout, nullptr);
 
-			vmaAllocator.destroy();
+			instance.vmaAllocator.destroy();
 
 			vkDestroySemaphore(instance.device, imageAvailableSemaphores, nullptr);
 			vkDestroySemaphore(instance.device, renderFinishedSemaphores, nullptr);
 			vkDestroyFence(instance.device, inFlightFences, nullptr);
 
-			vkDestroyCommandPool(instance.device, commandPool, nullptr);
+			vkDestroyCommandPool(instance.device, instance.commandPool.commandPool, nullptr);
 
 			vkDestroyPipeline(instance.device, graphicsPipeline, nullptr);
 
