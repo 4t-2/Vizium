@@ -37,6 +37,26 @@
 
 // Vizium
 
+static std::vector<char> readFile(const std::string &filename)
+{
+	std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+	if (!file.is_open())
+	{
+		throw std::runtime_error("failed to open file!");
+	}
+
+	size_t			  fileSize = (size_t)file.tellg();
+	std::vector<char> buffer(fileSize);
+
+	file.seekg(0);
+	file.read(buffer.data(), fileSize);
+
+	file.close();
+
+	return buffer;
+}
+
 VkCommandBuffer beginSingleTimeCommands(VkCommandPool commandPool, VkDevice device)
 {
 	VkCommandBufferAllocateInfo allocInfo{};
@@ -117,6 +137,10 @@ class CommandPool
 		{
 			Command command;
 
+			command.queue  = queue;
+			command.device = device;
+			command.pool   = commandPool;
+
 			VkCommandBufferAllocateInfo allocInfo{};
 			allocInfo.sType				 = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 			allocInfo.commandPool		 = commandPool;
@@ -183,11 +207,38 @@ class Queue
 		}
 };
 
+class Map
+{
+	public:
+		struct Data
+		{
+				VmaAllocation allocation;
+				VmaAllocator  allocator;
+				void		 *map;
+		} data;
+
+		Map(Data data)
+		{
+			this->data = data;
+		};
+
+		void write(void *test, int size)
+		{
+			memcpy(data.map, test, size);
+		}
+
+		~Map()
+		{
+			vmaUnmapMemory(data.allocator, data.allocation);
+		}
+};
+
 class Buffer
 {
 	public:
 		VkBuffer	  buffer;
 		VmaAllocation allocation;
+		int			  size;
 
 		VmaAllocator *allocator;
 
@@ -196,9 +247,23 @@ class Buffer
 			vmaMapMemory(*allocator, allocation, map);
 		}
 
+		Map mapTest()
+		{
+			void *map;
+			this->map(&map);
+
+			return Map::Data{allocation, *allocator, map};
+		}
+
 		void unmap()
 		{
 			vmaUnmapMemory(*allocator, allocation);
+		}
+
+		void singleCopy(void *data)
+		{
+			Map map = mapTest();
+			map.write(data, size);
 		}
 
 		void destroy()
@@ -389,6 +454,7 @@ class Allocator
 		{
 			Buffer buffer;
 			buffer.allocator = &vmaAllocator;
+			buffer.size		 = size;
 
 			VkBufferCreateInfo bufferInfo{};
 			bufferInfo.sType	   = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -612,6 +678,29 @@ struct UniformBufferObject
 		glm::mat4 proj;
 };
 
+class DescriptorLayout
+{
+	public:
+		VkDescriptorSetLayout layout;
+		int					  binding;
+
+		enum Type
+		{
+			UNIFORM_BUFFER		   = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			COMBINED_IMAGE_SAMPLER = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			STORAGE_BUFFER		   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		};
+
+		Type type;
+
+		enum Stage
+		{
+			VERTEX	 = VK_SHADER_STAGE_VERTEX_BIT,
+			FRAGMENT = VK_SHADER_STAGE_FRAGMENT_BIT,
+			COMPUTE	 = VK_SHADER_STAGE_COMPUTE_BIT,
+		};
+};
+
 class Descriptor
 {
 	public:
@@ -677,6 +766,62 @@ class Descriptor
 			descriptorWrite.pTexelBufferView = nullptr;
 
 			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		}
+};
+
+class DescriptorPool
+{
+	public:
+		VkDescriptorPool descriptorPool;
+		VkDevice		 device;
+
+		Descriptor createDescriptor(DescriptorLayout descriptorSetLayout, Buffer *buffer, Image *image)
+		{
+			Descriptor descriptor;
+
+			VkDescriptorSetAllocateInfo allocInfo{};
+			allocInfo.sType				 = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			allocInfo.descriptorPool	 = descriptorPool;
+			allocInfo.descriptorSetCount = 1;
+			allocInfo.pSetLayouts		 = &descriptorSetLayout.layout;
+
+			if (vkAllocateDescriptorSets(device, &allocInfo, &descriptor.descriptorSets) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to allocate descriptor sets!");
+			}
+
+			VkWriteDescriptorSet descriptorWrite;
+			descriptorWrite.sType			= VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrite.dstSet			= descriptor.descriptorSets;
+			descriptorWrite.dstBinding		= descriptorSetLayout.binding;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.pNext			= nullptr;
+
+			VkDescriptorBufferInfo bufferInfo;
+			if (buffer != nullptr)
+			{
+				bufferInfo.buffer = buffer->buffer;
+				bufferInfo.range  = buffer->size;
+				bufferInfo.offset = 0;
+			}
+
+			VkDescriptorImageInfo imageInfo;
+			if(image != nullptr)
+			{
+				imageInfo.sampler	  = image->sampler;
+				imageInfo.imageView	  = image->view;
+				imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
+
+			descriptorWrite.descriptorType	 = (VkDescriptorType)descriptorSetLayout.type;
+			descriptorWrite.pBufferInfo		 = buffer != nullptr ? &bufferInfo : nullptr;
+			descriptorWrite.pImageInfo		 = image != nullptr ? &imageInfo : nullptr;
+			descriptorWrite.pTexelBufferView = nullptr;
+
+			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+
+			return descriptor;
 		}
 };
 
@@ -808,6 +953,64 @@ class DescriptorBuffer
 		}
 };
 
+class Pipeline
+{
+	public:
+		VkPipeline		 pipeline;
+		VkPipelineLayout layout;
+		CommandPool		 pool;
+		Command			 command;
+		Queue			 queue;
+
+		void startDispatch()
+		{
+			VkCommandBufferBeginInfo beginInfo{};
+			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+			if (vkBeginCommandBuffer(command.buffer, &beginInfo) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to begin recording command buffer!");
+			}
+
+			vkCmdBindPipeline(command.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+		}
+		void dispatch(std::vector<VkDescriptorSet> descriptor, int x, int y, int z)
+		{
+			vkCmdBindDescriptorSets(command.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, descriptor.size(),
+									descriptor.data(), 0, 0);
+
+			vkCmdDispatch(command.buffer, x, y, z);
+		}
+		void endDispatch()
+		{
+			if (vkEndCommandBuffer(command.buffer) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to record command buffer!");
+			}
+
+			VkSubmitInfo submitInfo{};
+			submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			submitInfo.commandBufferCount = 1;
+			submitInfo.pCommandBuffers	  = &command.buffer;
+			if (vkQueueSubmit(queue.queue, 1, &submitInfo, nullptr) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to submit compute command buffer!");
+			}
+			vkQueueWaitIdle(queue.queue);
+		}
+};
+
+class GraphicsPipeline
+{
+	public:
+		VkPipeline pipeline;
+		VkPipelineLayout layout;
+		Queue graphicsQueue;
+		CommandPool graphicsPool;
+		Command graphicsBuffer;
+		VkRenderPass			   renderPass;
+};
+
 typedef std::map<Queue::Type, uint32_t> QueueMap;
 
 class Instance
@@ -819,13 +1022,327 @@ class Instance
 		VkDevice				 device;
 		QueueMap				 queueMap;
 		std::vector<uint32_t>	 uniqueQueues;
-		CommandPool				 commandPool;
+		CommandPool				 graphicsPool;
 		Queue					 transferQueue;
-
-		Allocator vmaAllocator;
+		CommandPool				 transferPool;
+		VkDescriptorPool		 descriptorPool;
+		Allocator				 vmaAllocator;
 
 		Instance()
 		{
+		}
+
+		VkShaderModule createShaderModule(const std::vector<char> &code)
+		{
+			VkShaderModuleCreateInfo createInfo{};
+			createInfo.sType	= VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+			createInfo.codeSize = code.size();
+			createInfo.pCode	= reinterpret_cast<const uint32_t *>(code.data());
+
+			VkShaderModule shaderModule;
+			if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create shader module!");
+			}
+			return shaderModule;
+		}
+
+		GraphicsPipeline createGraphicsPipeline(std::string vertPath, std::string fragPath, std::vector<VkDescriptorSetLayout> layouts)
+		{
+			GraphicsPipeline pipeline;
+
+			auto vertShaderCode = readFile(vertPath);
+			auto fragShaderCode = readFile(fragPath);
+
+			VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+			VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+			VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+			vertShaderStageInfo.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			vertShaderStageInfo.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+			vertShaderStageInfo.module = vertShaderModule;
+			vertShaderStageInfo.pName  = "main";
+
+			VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+			fragShaderStageInfo.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			fragShaderStageInfo.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+			fragShaderStageInfo.module = fragShaderModule;
+			fragShaderStageInfo.pName  = "main";
+
+			VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+
+			auto bindDesc = Vertex::getBindingDescription();
+			auto attrDesc = Vertex::getAttributeDescriptions();
+
+			VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+			vertexInputInfo.sType							= VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+			vertexInputInfo.vertexBindingDescriptionCount	= 1;
+			vertexInputInfo.pVertexBindingDescriptions		= &bindDesc; // Optional
+			vertexInputInfo.vertexAttributeDescriptionCount = attrDesc.size();
+			vertexInputInfo.pVertexAttributeDescriptions	= attrDesc.data(); // Optional
+
+			VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+			inputAssembly.sType					 = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+			inputAssembly.topology				 = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+			inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+			std::vector<VkDynamicState> dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+
+			VkPipelineDynamicStateCreateInfo dynamicState{};
+			dynamicState.sType			   = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+			dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+			dynamicState.pDynamicStates	   = dynamicStates.data();
+
+			VkPipelineViewportStateCreateInfo viewportState{};
+			viewportState.sType			= VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+			viewportState.viewportCount = 1;
+			viewportState.scissorCount	= 1;
+
+			VkPipelineRasterizationStateCreateInfo rasterizer{};
+			rasterizer.sType			= VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+			rasterizer.depthClampEnable = VK_FALSE;
+
+			rasterizer.rasterizerDiscardEnable = VK_FALSE;
+
+			rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+
+			rasterizer.lineWidth = 1.0f;
+
+			rasterizer.cullMode	 = VK_CULL_MODE_NONE;
+			rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+			rasterizer.depthBiasEnable		   = VK_FALSE;
+			rasterizer.depthBiasConstantFactor = 0.0f; // Optional
+			rasterizer.depthBiasClamp		   = 0.0f; // Optional
+			rasterizer.depthBiasSlopeFactor	   = 0.0f; // Optional
+
+			VkPipelineMultisampleStateCreateInfo multisampling{};
+			multisampling.sType					= VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+			multisampling.sampleShadingEnable	= VK_FALSE;
+			multisampling.rasterizationSamples	= VK_SAMPLE_COUNT_1_BIT;
+			multisampling.minSampleShading		= 1.0f;		// Optional
+			multisampling.pSampleMask			= nullptr;	// Optional
+			multisampling.alphaToCoverageEnable = VK_FALSE; // Optional
+			multisampling.alphaToOneEnable		= VK_FALSE; // Optional
+
+			VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+			colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+												  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+			colorBlendAttachment.blendEnable		 = VK_FALSE;
+			colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;			// Optional
+			colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA; // Optional
+			colorBlendAttachment.colorBlendOp		 = VK_BLEND_OP_ADD;						// Optional
+			colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;					// Optional
+			colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;				// Optional
+			colorBlendAttachment.alphaBlendOp		 = VK_BLEND_OP_ADD;						// Optional
+
+			VkPipelineColorBlendStateCreateInfo colorBlending{};
+			colorBlending.sType				= VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+			colorBlending.logicOpEnable		= VK_FALSE;
+			colorBlending.logicOp			= VK_LOGIC_OP_COPY; // Optional
+			colorBlending.attachmentCount	= 1;
+			colorBlending.pAttachments		= &colorBlendAttachment;
+			colorBlending.blendConstants[0] = 0.0f; // Optional
+			colorBlending.blendConstants[1] = 0.0f; // Optional
+			colorBlending.blendConstants[2] = 0.0f; // Optional
+			colorBlending.blendConstants[3] = 0.0f; // Optional
+
+			VkPushConstantRange pushConstant;
+			pushConstant.offset		= 0;
+			pushConstant.size		= sizeof(UniformBufferObject);
+			pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+			pipelineLayoutInfo.sType				  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipelineLayoutInfo.setLayoutCount		  = layouts.size();
+			pipelineLayoutInfo.pSetLayouts			  = layouts.data();
+			pipelineLayoutInfo.pushConstantRangeCount = 0;		 // Optional
+			pipelineLayoutInfo.pPushConstantRanges	  = nullptr; // Optional
+
+			if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipeline.layout) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create pipeline layout!");
+			}
+
+			VkGraphicsPipelineCreateInfo pipelineInfo{};
+			pipelineInfo.sType		= VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+			pipelineInfo.stageCount = 2;
+			pipelineInfo.pStages	= shaderStages;
+
+			pipelineInfo.pVertexInputState	 = &vertexInputInfo;
+			pipelineInfo.pInputAssemblyState = &inputAssembly;
+			pipelineInfo.pViewportState		 = &viewportState;
+			pipelineInfo.pRasterizationState = &rasterizer;
+			pipelineInfo.pMultisampleState	 = &multisampling;
+			pipelineInfo.pDepthStencilState	 = nullptr; // Optional
+			pipelineInfo.pColorBlendState	 = &colorBlending;
+			pipelineInfo.pDynamicState		 = &dynamicState;
+
+			pipelineInfo.layout = pipeline.layout;
+
+			pipelineInfo.renderPass = pipeline.renderPass;
+			pipelineInfo.subpass	= 0;
+
+			pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
+			pipelineInfo.basePipelineIndex	= -1;			  // Optional
+
+			if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+										  &pipeline.pipeline) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create graphics pipeline!");
+			}
+
+			vkDestroyShaderModule(device, fragShaderModule, nullptr);
+			vkDestroyShaderModule(device, vertShaderModule, nullptr);
+
+			pipeline.graphicsQueue = this->createQueue(Queue::Type::GRAPHICS);
+			pipeline.graphicsPool = pipeline.graphicsQueue.createCommandPool();
+			pipeline.graphicsBuffer = pipeline.graphicsPool.create();
+
+			return pipeline;
+		}
+
+		DescriptorLayout createLayout(int binding, DescriptorLayout::Type type, DescriptorLayout::Stage stageFlags)
+		{
+			DescriptorLayout layout;
+			layout.type	   = type;
+			layout.binding = binding;
+
+			VkDescriptorSetLayoutBinding layoutBinding{};
+			layoutBinding.binding			 = binding;
+			layoutBinding.descriptorCount	 = 1;
+			layoutBinding.descriptorType	 = (VkDescriptorType)type;
+			layoutBinding.stageFlags		 = stageFlags;
+			layoutBinding.pImmutableSamplers = nullptr;
+
+			VkDescriptorSetLayoutCreateInfo layoutInfo{};
+			layoutInfo.sType		= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+			layoutInfo.bindingCount = 1;
+			layoutInfo.pBindings	= &layoutBinding;
+			if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout.layout) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create descriptor set layout!");
+			}
+
+			return layout;
+		}
+
+		DescriptorPool createDescriptorPool()
+		{
+			DescriptorPool pool;
+			pool.device = device;
+
+			VkDescriptorPoolSize poolSize[] = {
+				{.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 16},
+				{.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 16},
+				{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 16},
+			};
+
+			VkDescriptorPoolCreateInfo poolInfo{};
+			poolInfo.sType		   = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+			poolInfo.poolSizeCount = 3;
+			poolInfo.pPoolSizes	   = poolSize;
+
+			poolInfo.maxSets = 64;
+
+			if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool.descriptorPool) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create descriptor pool!");
+			}
+
+			return pool;
+		}
+
+		enum BufferUsage
+		{
+			VERTEX		   = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			STORAGE_BUFFER = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			TRANSFER_DST   = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			TRANSFER_SRC   = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		};
+
+		enum BufferAccess
+		{
+			GPUONLY,
+			CPUGPU,
+		};
+
+		Buffer createBuffer(int size, unsigned int BufferUsageFlags, BufferAccess access)
+		{
+			Buffer buffer = vmaAllocator.allocate(size, BufferUsageFlags,
+												  {.flags = access == CPUGPU
+																? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+																: (VmaAllocationCreateFlags)0,
+												   .usage = VMA_MEMORY_USAGE_AUTO});
+
+			return buffer;
+		}
+
+		void copyBufferData(Buffer src, Buffer dst)
+		{
+			// copy
+			Command command = transferPool.create();
+
+			command.beginOneTime();
+
+			VkBufferCopy copyRegion{};
+			copyRegion.srcOffset = 0; // Optional
+			copyRegion.dstOffset = 0; // Optional
+			copyRegion.size		 = src.size;
+			vkCmdCopyBuffer(command.buffer, src.buffer, dst.buffer, 1, &copyRegion);
+
+			command.submit();
+		}
+
+		Pipeline createComputePipeline(std::string path, std::vector<VkDescriptorSetLayout> layouts)
+		{
+			VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
+			auto							computeShader = readFile("compute.spv");
+
+			VkShaderModuleCreateInfo createInfo{};
+			createInfo.sType	= VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+			createInfo.codeSize = computeShader.size();
+			createInfo.pCode	= reinterpret_cast<const uint32_t *>(computeShader.data());
+
+			VkShaderModule shader;
+			if (vkCreateShaderModule(device, &createInfo, nullptr, &shader) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create shader module!");
+			}
+
+			computeShaderStageInfo.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			computeShaderStageInfo.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+			computeShaderStageInfo.module = shader;
+			computeShaderStageInfo.pName  = "main";
+
+			Pipeline pipeline;
+
+			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+			pipelineLayoutInfo.sType		  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipelineLayoutInfo.setLayoutCount = layouts.size();
+			pipelineLayoutInfo.pSetLayouts	  = layouts.data();
+
+			if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipeline.layout) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create compute pipeline layout!");
+			}
+
+			VkComputePipelineCreateInfo pipelineInfo{};
+			pipelineInfo.sType	= VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+			pipelineInfo.layout = pipeline.layout;
+			pipelineInfo.stage	= computeShaderStageInfo;
+
+			if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline.pipeline) !=
+				VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to create compute pipeline!");
+			}
+
+			pipeline.queue	 = this->createQueue(Queue::Type::COMPUTE);
+			pipeline.pool	 = pipeline.queue.createCommandPool();
+			pipeline.command = pipeline.pool.create();
+
+			return pipeline;
 		}
 
 		Queue createQueue(Queue::Type type)
@@ -846,8 +1363,8 @@ class Instance
 			vertexBuffer.vertexCount = data.size();
 
 			vertexBuffer.buffer = vmaAllocator.stageAllocate(sizeof(data[0]) * data.size(), data.data(),
-															 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, commandPool.commandPool,
-															 transferQueue.queue);
+															 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+															 transferPool.commandPool, transferQueue.queue);
 
 			return vertexBuffer;
 		}
@@ -881,7 +1398,7 @@ class Instance
 													 {.usage = VMA_MEMORY_USAGE_GPU_ONLY});
 
 			// copy image from buffer
-			texture.image.copyFromBuffer(stagingBuffer, commandPool.commandPool, device, transferQueue.queue);
+			texture.image.copyFromBuffer(stagingBuffer, transferPool.commandPool, device, transferQueue.queue);
 
 			// cleanup buffer
 			stagingBuffer.destroy();
@@ -896,11 +1413,6 @@ class Instance
 			ubo.buffer.unmap();
 			ubo.buffer.destroy();
 		}
-};
-
-class Pipeline
-{
-	public:
 };
 
 class HelloTriangleApplication
@@ -933,10 +1445,6 @@ class HelloTriangleApplication
 		VkRenderPass			   renderPass;
 		VkPipeline				   graphicsPipeline;
 		std::vector<VkFramebuffer> swapChainFramebuffers;
-
-		Queue		computeQueue;
-		CommandPool computeCommandPool;
-		Command		computeCommandBuffers;
 
 		uint32_t imageIndex;
 
@@ -1505,38 +2013,26 @@ class HelloTriangleApplication
 
 		void initVulkan()
 		{
-			PRINT("test");
 			createInstance();
 			setupDebugMessenger();
 			createSurface();
-			PRINT("test");
 			pickPhysicalDevice();
 			createLogicalDevice();
 			createSwapChain();
 			createImageViews();
 			createRenderPass();
-			PRINT("test");
 			createDescriptorSetLayout();
-			PRINT("test");
 			createGraphicsPipeline();
-			PRINT("test");
 			createFrameBuffers();
-			PRINT("test");
 			createCommandPool();
-			PRINT("test");
 			createVertexBuffer();
-			PRINT("test");
 			createTextureImage();
 			createTextureImageView();
 			createTextureSampler();
 			createDescriptorPool();
-			PRINT("test");
 			createDescriptorSets();
-			PRINT("test");
 			createCommandBuffer();
-			PRINT("test");
 			createSyncObjects();
-			PRINT("test");
 		}
 
 		void createTextureSampler()
@@ -1738,8 +2234,8 @@ class HelloTriangleApplication
 		{
 			layoutMaker9000(descriptorSetLayout, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
 			layoutMaker9000(textureLayout, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-			layoutMaker9000(compLayoutIn, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
-			layoutMaker9000(compLayoutOut, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+			/*layoutMaker9000(compLayoutIn, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);*/
+			/*layoutMaker9000(compLayoutOut, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);*/
 		}
 
 		void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
@@ -1875,16 +2371,15 @@ class HelloTriangleApplication
 
 		void createCommandBuffer()
 		{
-			commandBuffers		  = instance.commandPool.create();
-			computeCommandBuffers = computeCommandPool.create();
+			commandBuffers = instance.graphicsPool.create();
 		}
 
 		void createCommandPool()
 		{
 			instance.transferQueue = instance.createQueue(Queue::Type::TRANSFER);
-			instance.commandPool   = graphicsQueue.createCommandPool();
-			computeQueue		   = instance.createQueue(Queue::Type::COMPUTE);
-			computeCommandPool	   = computeQueue.createCommandPool();
+			instance.transferPool  = instance.transferQueue.createCommandPool();
+			graphicsQueue		   = instance.createQueue(Queue::Type::GRAPHICS);
+			instance.graphicsPool  = graphicsQueue.createCommandPool();
 		}
 
 		void createFrameBuffers()
@@ -1984,26 +2479,6 @@ class HelloTriangleApplication
 					throw std::runtime_error("failed to create image views!");
 				}
 			}
-		}
-
-		static std::vector<char> readFile(const std::string &filename)
-		{
-			std::ifstream file(filename, std::ios::ate | std::ios::binary);
-
-			if (!file.is_open())
-			{
-				throw std::runtime_error("failed to open file!");
-			}
-
-			size_t			  fileSize = (size_t)file.tellg();
-			std::vector<char> buffer(fileSize);
-
-			file.seekg(0);
-			file.read(buffer.data(), fileSize);
-
-			file.close();
-
-			return buffer;
 		}
 
 		VkShaderModule createShaderModule(const std::vector<char> &code)
@@ -2183,7 +2658,7 @@ class HelloTriangleApplication
 
 			std::vector<Vertex> triangleData;
 
-			int distpa = 1024;
+			int distpa		= 1024;
 			int pointAmount = 1024 * distpa;
 
 			std::default_random_engine	   rand(1);
@@ -2210,85 +2685,74 @@ class HelloTriangleApplication
 				triangleData.push_back(v);
 			}
 
-			Buffer shaderStorageBuffer1 = instance.vmaAllocator.stageAllocate(
-				triangleData.size() * sizeof(Vertex), triangleData.data(),
-				VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-				instance.commandPool.commandPool, graphicsQueue.queue);
-			Buffer shaderStorageBuffer2 = instance.vmaAllocator.allocate(
+			Buffer shaderStorageBuffer1 =
+				instance.createBuffer(triangleData.size() * sizeof(Vertex),
+									  Instance::BufferUsage::STORAGE_BUFFER | Instance::BufferUsage::VERTEX |
+										  Instance::BufferUsage::TRANSFER_DST,
+									  Instance::BufferAccess::GPUONLY);
+
+			{
+				Buffer stage = instance.createBuffer(triangleData.size() * sizeof(Vertex), Instance::TRANSFER_SRC,
+													 Instance::BufferAccess::CPUGPU);
+				stage.singleCopy(triangleData.data());
+
+				instance.copyBufferData(stage, shaderStorageBuffer1);
+
+				stage.destroy();
+			}
+
+			Buffer shaderStorageBuffer2 = instance.createBuffer(
 				triangleData.size() * sizeof(Vertex),
-				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-				{.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, .usage = VMA_MEMORY_USAGE_AUTO});
+				Instance::BufferUsage::VERTEX | Instance::BufferUsage::STORAGE_BUFFER, Instance::BufferAccess::CPUGPU);
 
-			VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
-			auto							computeShader = readFile("compute.spv");
-			VkShaderModule					shader		  = createShaderModule(computeShader);
-			{
+			DescriptorLayout compLayoutIn =
+				instance.createLayout(0, DescriptorLayout::Type::STORAGE_BUFFER, DescriptorLayout::Stage::COMPUTE);
+			DescriptorLayout compLayoutOut =
+				instance.createLayout(0, DescriptorLayout::Type::STORAGE_BUFFER, DescriptorLayout::Stage::COMPUTE);
 
-				computeShaderStageInfo.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-				computeShaderStageInfo.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
-				computeShaderStageInfo.module = shader;
-				computeShaderStageInfo.pName  = "main";
-			}
+			DescriptorPool p;
+			p.descriptorPool = descriptorPool;
+			p.device = instance.device;
 
-			Descriptor compIn;
-			{
-				auto write = compIn.setupMeta(descriptorPool, compLayoutIn, instance.device, 0);
+			Descriptor compIn  = p.createDescriptor(compLayoutIn, &shaderStorageBuffer1, nullptr);
+			Descriptor compOut = p.createDescriptor(compLayoutOut, &shaderStorageBuffer2, nullptr);
 
-				VkDescriptorBufferInfo bufferInfo;
-				bufferInfo.buffer = shaderStorageBuffer1.buffer;
-				bufferInfo.range  = sizeof(Vertex) * triangleData.size();
-				bufferInfo.offset = 0;
+			/*Descriptor compIn;*/
+			/*{*/
+			/*	auto write = compIn.setupMeta(descriptorPool, compLayoutIn.layout, instance.device, 0);*/
+			/**/
+			/*	VkDescriptorBufferInfo bufferInfo;*/
+			/*	bufferInfo.buffer = shaderStorageBuffer1.buffer;*/
+			/*	bufferInfo.range  = sizeof(Vertex) * triangleData.size();*/
+			/*	bufferInfo.offset = 0;*/
+			/**/
+			/*	write.descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;*/
+			/*	write.pBufferInfo	   = &bufferInfo;*/
+			/*	write.pImageInfo	   = nullptr;*/
+			/*	write.pTexelBufferView = nullptr;*/
+			/**/
+			/*	vkUpdateDescriptorSets(instance.device, 1, &write, 0, nullptr);*/
+			/*}*/
+			/*Descriptor compOut;*/
+			/*{*/
+			/*	auto write = compOut.setupMeta(descriptorPool, compLayoutOut.layout, instance.device, 0);*/
+			/**/
+			/*	VkDescriptorBufferInfo bufferInfo;*/
+			/*	bufferInfo.buffer = shaderStorageBuffer2.buffer;*/
+			/*	bufferInfo.range  = sizeof(Vertex) * triangleData.size();*/
+			/*	bufferInfo.offset = 0;*/
+			/**/
+			/*	write.descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;*/
+			/*	write.pBufferInfo	   = &bufferInfo;*/
+			/*	write.pImageInfo	   = nullptr;*/
+			/*	write.pTexelBufferView = nullptr;*/
+			/**/
+			/*	vkUpdateDescriptorSets(instance.device, 1, &write, 0, nullptr);*/
+			/*}*/
 
-				write.descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-				write.pBufferInfo	   = &bufferInfo;
-				write.pImageInfo	   = nullptr;
-				write.pTexelBufferView = nullptr;
 
-				vkUpdateDescriptorSets(instance.device, 1, &write, 0, nullptr);
-			}
-			Descriptor compOut;
-			{
-				auto write = compOut.setupMeta(descriptorPool, compLayoutOut, instance.device, 0);
-
-				VkDescriptorBufferInfo bufferInfo;
-				bufferInfo.buffer = shaderStorageBuffer2.buffer;
-				bufferInfo.range  = sizeof(Vertex) * triangleData.size();
-				bufferInfo.offset = 0;
-
-				write.descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-				write.pBufferInfo	   = &bufferInfo;
-				write.pImageInfo	   = nullptr;
-				write.pTexelBufferView = nullptr;
-
-				vkUpdateDescriptorSets(instance.device, 1, &write, 0, nullptr);
-			}
-
-			VkPipelineLayout computePipelineLayout;
-			VkPipeline		 computePipeline;
-			{
-				VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-				pipelineLayoutInfo.sType		  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-				pipelineLayoutInfo.setLayoutCount = 2;
-				std::array layout				  = {compLayoutIn, compLayoutOut};
-				pipelineLayoutInfo.pSetLayouts	  = layout.data();
-
-				if (vkCreatePipelineLayout(instance.device, &pipelineLayoutInfo, nullptr, &computePipelineLayout) !=
-					VK_SUCCESS)
-				{
-					throw std::runtime_error("failed to create compute pipeline layout!");
-				}
-
-				VkComputePipelineCreateInfo pipelineInfo{};
-				pipelineInfo.sType	= VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-				pipelineInfo.layout = computePipelineLayout;
-				pipelineInfo.stage	= computeShaderStageInfo;
-
-				if (vkCreateComputePipelines(instance.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
-											 &computePipeline) != VK_SUCCESS)
-				{
-					throw std::runtime_error("failed to create compute pipeline!");
-				}
-			}
+			Pipeline compPipeline =
+				instance.createComputePipeline("compute.spv", {compLayoutIn.layout, compLayoutOut.layout});
 
 			VertexBuffer triangle = instance.createVertexBuffer(triangleData);
 
@@ -2325,38 +2789,12 @@ class HelloTriangleApplication
 					shift += 0.01;
 				}
 
-				VkCommandBufferBeginInfo beginInfo{};
-				beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+				std::vector desc = flip ? std::vector{compIn.descriptorSets, compOut.descriptorSets}
+										: std::vector{compOut.descriptorSets, compIn.descriptorSets};
 
-				if (vkBeginCommandBuffer(computeCommandBuffers.buffer, &beginInfo) != VK_SUCCESS)
-				{
-					throw std::runtime_error("failed to begin recording command buffer!");
-				}
-
-				vkCmdBindPipeline(computeCommandBuffers.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
-
-				std::array desc = flip ? std::array{compIn.descriptorSets, compOut.descriptorSets}
-									   : std::array{compOut.descriptorSets, compIn.descriptorSets};
-
-				vkCmdBindDescriptorSets(computeCommandBuffers.buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-										computePipelineLayout, 0, 2, desc.data(), 0, 0);
-
-				vkCmdDispatch(computeCommandBuffers.buffer, distpa, 1, 1);
-
-				if (vkEndCommandBuffer(computeCommandBuffers.buffer) != VK_SUCCESS)
-				{
-					throw std::runtime_error("failed to record command buffer!");
-				}
-
-				VkSubmitInfo submitInfo{};
-				submitInfo.sType			  = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-				submitInfo.commandBufferCount = 1;
-				submitInfo.pCommandBuffers	  = &computeCommandBuffers.buffer;
-				if (vkQueueSubmit(computeQueue.queue, 1, &submitInfo, nullptr) != VK_SUCCESS)
-				{
-					throw std::runtime_error("failed to submit compute command buffer!");
-				}
-				vkQueueWaitIdle(computeQueue.queue);
+				compPipeline.startDispatch();
+				compPipeline.dispatch(desc, distpa, 1, 1);
+				compPipeline.endDispatch();
 
 				UniformBufferObject ubo{};
 				ubo.model = glm::translate(glm::mat4(1.f), {0, 0, 0});
@@ -2382,14 +2820,11 @@ class HelloTriangleApplication
 				vb.buffer.buffer = flip ? shaderStorageBuffer2.buffer : shaderStorageBuffer1.buffer;
 				vb.vertexCount	 = triangleData.size();
 				draw(vb, {uniform.descriptor, texture.descriptor});
-				/*draw(square, {uniform.descriptor, texture.descriptor});*/
 
+				ubo.model = glm::translate(glm::mat4(1.f), {0, 0, 0});
 				endDraw();
-				auto end = std::chrono::system_clock::now();
 
-				/*std::cout << 1000.0 /
-				 * std::chrono::duration_cast<std::chrono::milliseconds>(end -
-				 * start).count() << '\n';*/
+				auto end = std::chrono::system_clock::now();
 				frame++;
 
 				flip = !flip;
@@ -2559,9 +2994,7 @@ class HelloTriangleApplication
 		{
 			cleanupSwapChain();
 
-			vkDestroyDescriptorPool(instance.device, descriptorPool, nullptr);
-			vkDestroyDescriptorSetLayout(instance.device, descriptorSetLayout, nullptr);
-			vkDestroyDescriptorSetLayout(instance.device, textureLayout, nullptr);
+			vkDestroyDescriptorPool(instance.device, instance.descriptorPool, nullptr);
 
 			instance.vmaAllocator.destroy();
 
@@ -2569,7 +3002,8 @@ class HelloTriangleApplication
 			vkDestroySemaphore(instance.device, renderFinishedSemaphores, nullptr);
 			vkDestroyFence(instance.device, inFlightFences, nullptr);
 
-			vkDestroyCommandPool(instance.device, instance.commandPool.commandPool, nullptr);
+			/*vkDestroyCommandPool(instance.device, instance.commandPool.commandPool,
+			 * nullptr);*/
 
 			vkDestroyPipeline(instance.device, graphicsPipeline, nullptr);
 
