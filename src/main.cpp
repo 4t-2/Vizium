@@ -558,6 +558,7 @@ struct Vertex
 {
 		glm::vec4 pos;
 		glm::vec4 color;
+		glm::vec4 vel;
 
 		static VkVertexInputBindingDescription getBindingDescription()
 		{
@@ -569,9 +570,9 @@ struct Vertex
 			return bindingDescription;
 		}
 
-		static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions()
+		static std::array<VkVertexInputAttributeDescription, 3> getAttributeDescriptions()
 		{
-			std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+			std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
 
 			attributeDescriptions[0].binding  = 0;
 			attributeDescriptions[0].location = 0;
@@ -582,6 +583,11 @@ struct Vertex
 			attributeDescriptions[1].location = 1;
 			attributeDescriptions[1].format	  = VK_FORMAT_R32G32B32_SFLOAT;
 			attributeDescriptions[1].offset	  = offsetof(Vertex, color);
+
+			attributeDescriptions[2].binding  = 0;
+			attributeDescriptions[2].location = 2;
+			attributeDescriptions[2].format	  = VK_FORMAT_R32G32B32_SFLOAT;
+			attributeDescriptions[2].offset	  = offsetof(Vertex, vel);
 
 			return attributeDescriptions;
 		}
@@ -963,7 +969,7 @@ class HelloTriangleApplication
 
 		void initWindow()
 		{
-			window.setup(800, 600, "Vulkan");
+			window.setup(1000, 1000, "Vulkan");
 		}
 
 		bool checkValidationLayerSupport()
@@ -2049,7 +2055,7 @@ class HelloTriangleApplication
 
 			VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
 			inputAssembly.sType					 = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-			inputAssembly.topology				 = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			inputAssembly.topology				 = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
 			inputAssembly.primitiveRestartEnable = VK_FALSE;
 
 			std::vector<VkDynamicState> dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -2170,11 +2176,48 @@ class HelloTriangleApplication
 
 		void mainLoop()
 		{
-			std::vector<Vertex> triangleData = {{{0.0f, -1.f, 0, 0}, {1.0f, 0.0f, 0.0f, 0}},   //
-													  {{0.5f, 0.5f, 0, 0}, {0.0f, 1.0f, 0.0f, 0}},   //
-													  {{-0.5f, 0.5f, 0, 0}, {0.0f, 0.0f, 1.0f, 0}}}; //
-			Buffer							shaderStorageBuffer1 = instance.vmaAllocator.stageAllocate(triangleData.size() * sizeof(Vertex), triangleData.data(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, instance.commandPool.commandPool, graphicsQueue.queue);
-			Buffer							shaderStorageBuffer2 = instance.vmaAllocator.allocate(triangleData.size() * sizeof(Vertex), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, {.flags=VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, .usage = VMA_MEMORY_USAGE_AUTO});
+			VkPhysicalDeviceProperties prop;
+			vkGetPhysicalDeviceProperties(instance.physicalDevice, &prop);
+
+			std::cout << prop.limits.maxComputeWorkGroupInvocations << '\n';
+
+			std::vector<Vertex> triangleData;
+
+			int distpa = 1024;
+			int pointAmount = 1024 * distpa;
+
+			std::default_random_engine	   rand(1);
+			std::uniform_real_distribution dist(-1., 1.);
+			std::uniform_real_distribution colDist(0., 1.);
+			for (int i = 0; i < pointAmount; i++)
+			{
+				Vertex v;
+				v.pos.x = .1 + (float)i / pointAmount / 1.5;
+				v.pos.y = dist(rand) / 5;
+				v.pos.z = 0;
+				v.pos.w = 0;
+
+				v.color.x = colDist(rand);
+				v.color.y = colDist(rand);
+				v.color.z = colDist(rand);
+				v.color.w = 0;
+
+				v.vel.x = 0;
+				v.vel.y = -0.001;
+				v.vel.z = 0;
+				v.vel.w = 0;
+
+				triangleData.push_back(v);
+			}
+
+			Buffer shaderStorageBuffer1 = instance.vmaAllocator.stageAllocate(
+				triangleData.size() * sizeof(Vertex), triangleData.data(),
+				VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				instance.commandPool.commandPool, graphicsQueue.queue);
+			Buffer shaderStorageBuffer2 = instance.vmaAllocator.allocate(
+				triangleData.size() * sizeof(Vertex),
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+				{.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, .usage = VMA_MEMORY_USAGE_AUTO});
 
 			VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
 			auto							computeShader = readFile("compute.spv");
@@ -2265,6 +2308,8 @@ class HelloTriangleApplication
 
 			int frame = 0;
 
+			bool flip = true;
+
 			while (!window.shouldClose())
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -2289,11 +2334,14 @@ class HelloTriangleApplication
 				}
 
 				vkCmdBindPipeline(computeCommandBuffers.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
-				std::array desc = {compIn.descriptorSets, compOut.descriptorSets};
+
+				std::array desc = flip ? std::array{compIn.descriptorSets, compOut.descriptorSets}
+									   : std::array{compOut.descriptorSets, compIn.descriptorSets};
+
 				vkCmdBindDescriptorSets(computeCommandBuffers.buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
 										computePipelineLayout, 0, 2, desc.data(), 0, 0);
 
-				vkCmdDispatch(computeCommandBuffers.buffer, 1, 1, 1);
+				vkCmdDispatch(computeCommandBuffers.buffer, distpa, 1, 1);
 
 				if (vkEndCommandBuffer(computeCommandBuffers.buffer) != VK_SUCCESS)
 				{
@@ -2323,7 +2371,7 @@ class HelloTriangleApplication
 											(float)swapChainExtent.width / swapChainExtent.height, 0.1f, 100.0f);
 
 				ubo.proj = glm::ortho<float>(-1, 1, -1, 1);
-/*ubo.proj = glm::mat4(1);*/
+				/*ubo.proj = glm::mat4(1);*/
 				/*ubo.proj[1][1] *= -1;*/
 
 				/*ubo = UniformBufferObject();*/
@@ -2331,8 +2379,8 @@ class HelloTriangleApplication
 				uniform.update(ubo);
 
 				VertexBuffer vb;
-				vb.buffer.buffer = shaderStorageBuffer2.buffer;
-				vb.vertexCount = triangleData.size();
+				vb.buffer.buffer = flip ? shaderStorageBuffer2.buffer : shaderStorageBuffer1.buffer;
+				vb.vertexCount	 = triangleData.size();
 				draw(vb, {uniform.descriptor, texture.descriptor});
 				/*draw(square, {uniform.descriptor, texture.descriptor});*/
 
@@ -2343,14 +2391,17 @@ class HelloTriangleApplication
 				 * std::chrono::duration_cast<std::chrono::milliseconds>(end -
 				 * start).count() << '\n';*/
 				frame++;
+
+				flip = !flip;
 			}
 
-			Vertex* map;
-			shaderStorageBuffer2.map((void**)&map);
-			for(int i = 0; i < 3; i++)
+			Vertex *map;
+			shaderStorageBuffer2.map((void **)&map);
+			for (int i = 0; i < 3; i++)
 			{
 				std::cout << map[i].pos.x << " " << map[i].pos.y << " " << map[i].pos.z << " " << map[i].pos.w << "\n";
-				std::cout << map[i].color.x << " " << map[i].color.y << " " << map[i].color.z << " " << map[i].color.w << "\n";
+				std::cout << map[i].color.x << " " << map[i].color.y << " " << map[i].color.z << " " << map[i].color.w
+						  << "\n";
 				std::cout << "\n";
 			}
 
