@@ -1,8 +1,5 @@
-.cache/clangd/index
-VulkanMemoryAllocator
-bin/a
-bin/*.spv
-bin/*.jpg
+CMakeUserPresets.json
+.cache
+*.out
+*.spv
 build
-vcpkg
-src/stb_image.h

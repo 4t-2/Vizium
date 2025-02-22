@@ -1,0 +1,8 @@
+{
+  "dependencies": [
+    "vulkan",
+    "vulkan-memory-allocator",
+    "glfw3",
+	"stb"
+  ]
+}
