@@ -8,6 +8,7 @@ set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set (CMAKE_CXX_STANDARD 17)
 
+find_package(imgui CONFIG REQUIRED)
 find_package(Vulkan)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
@@ -18,3 +19,4 @@ target_link_libraries(test.out PRIVATE Vulkan::Vulkan GPUOpen::VulkanMemoryAlloc
 target_link_libraries(test.out PRIVATE glfw)
 target_include_directories(test.out PUBLIC "../../Viz")
 target_include_directories(test.out PRIVATE ${Stb_INCLUDE_DIR})
+target_link_libraries(test.out PRIVATE imgui::imgui)

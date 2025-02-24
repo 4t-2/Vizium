@@ -1,6 +1,6 @@
 #define STB_IMAGE_IMPLEMENTATION
-#include <viz.hpp>
 #include <stb_image.h>
+#include <viz.hpp>
 
 class Vertex
 {
@@ -17,7 +17,7 @@ int main()
 	glfwInit();
 	instance.bootstrap(true);
 
-	Window	   window	  = instance.createWindow(800, 600, "Vizium");
+	Window	   window	  = instance.createWindow(1800, 800, "Vizium", true);
 	Dispatcher dispatcher = instance.createDispatcher();
 
 	DescriptorLayout textureLayout =
@@ -83,16 +83,12 @@ int main()
 	Sampler	   sampler			 = instance.createSampler(VK_FILTER_NEAREST);
 	Descriptor textureDescriptor = descriptorPool.createDescriptor(textureLayout, nullptr, &texture, &sampler);
 
-	int frame = 0;
-
 	bool flip = true;
 
 	std::cout << window.swapChainImages.size() << '\n';
 
 	while (!window.shouldClose())
 	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
-		auto start = std::chrono::system_clock::now();
 		glfwPollEvents();
 
 		window.startDraw();
@@ -112,10 +108,39 @@ int main()
 
 		window.draw(pointAmount, {textureDescriptor, flip ? compIn : compOut}, pipeline);
 
-		window.endDraw();
+		ImGui::ShowDemoWindow();
 
-		auto end = std::chrono::system_clock::now();
-		frame++;
+		static bool thing = true;
+		static float fl = 0;
+		{
+			static float f		 = 0.0f;
+			static int	 counter = 0;
+
+			ImGui::Begin("Hello, world!"); // Create a window called "Hello, world!"
+										   // and append into it.
+
+			ImGui::Text("This is some useful text."); // Display some text (you can
+													  // use a format strings too)
+			ImGui::Checkbox("Demo Window",
+							&thing); // Edit bools storing our window open/close state
+			ImGui::Checkbox("Another Window", &thing);
+
+			ImGui::SliderFloat("float", &fl, 0.0f,
+							   1.0f); // Edit 1 float using a slider from 0.0f to 1.0f
+
+			if (ImGui::Button("Button")) // Buttons return true when clicked (most
+										 // widgets return true when edited/activated)
+				counter++;
+			ImGui::SameLine();
+			ImGui::Text("counter = %d", counter);
+			auto io = ImGui::GetIO();
+			ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+			ImGui::End();
+		}
+
+
+		window.waitTillInterval(20);
+		window.endDraw();
 
 		flip = !flip;
 	}

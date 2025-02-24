@@ -2,6 +2,10 @@
 #include <array>
 #include <chrono>
 #include <glm/ext/matrix_transform.hpp>
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <random>
@@ -527,6 +531,72 @@ class Pipeline
 		VkPipelineLayout layout;
 };
 
+class DescriptorPool
+{
+	public:
+		VkDescriptorPool descriptorPool;
+		VkDevice		 device;
+
+		Descriptor createDescriptor(DescriptorLayout descriptorSetLayout, Buffer *buffer, Image *image,
+									Sampler *sampler)
+		{
+			Descriptor descriptor;
+
+			VkDescriptorSetAllocateInfo allocInfo{};
+			allocInfo.sType				 = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			allocInfo.descriptorPool	 = descriptorPool;
+			allocInfo.descriptorSetCount = 1;
+			allocInfo.pSetLayouts		 = &descriptorSetLayout.layout;
+
+			if (vkAllocateDescriptorSets(device, &allocInfo, &descriptor.descriptorSets) != VK_SUCCESS)
+			{
+				throw std::runtime_error("failed to allocate descriptor sets!");
+			}
+
+			VkWriteDescriptorSet descriptorWrite;
+			descriptorWrite.sType			= VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrite.dstSet			= descriptor.descriptorSets;
+			descriptorWrite.dstBinding		= descriptorSetLayout.binding;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.pNext			= nullptr;
+
+			VkDescriptorBufferInfo bufferInfo;
+			if (buffer != nullptr)
+			{
+				bufferInfo.buffer = buffer->buffer;
+				bufferInfo.range  = buffer->size;
+				bufferInfo.offset = 0;
+			}
+
+			VkDescriptorImageInfo imageInfo;
+			if (sampler != nullptr)
+			{
+				imageInfo.sampler = sampler->sampler;
+			}
+
+			if (image != nullptr)
+			{
+				imageInfo.imageView	  = image->view;
+				imageInfo.imageLayout = image->currentLayout;
+			}
+
+			descriptorWrite.descriptorType	 = (VkDescriptorType)descriptorSetLayout.type;
+			descriptorWrite.pBufferInfo		 = buffer != nullptr ? &bufferInfo : nullptr;
+			descriptorWrite.pImageInfo		 = image != nullptr ? &imageInfo : nullptr;
+			descriptorWrite.pTexelBufferView = nullptr;
+
+			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+
+			return descriptor;
+		}
+
+		void reset()
+		{
+			vkResetDescriptorPool(device, descriptorPool, 0);
+		}
+};
+
 class Window
 {
 	public:
@@ -552,6 +622,16 @@ class Window
 
 		VkDevice		 device;
 		VkPhysicalDevice physicalDevice;
+
+		bool		   imguiEnabled = false;
+		DescriptorPool imguiDescriptorPool;
+
+		std::chrono::time_point<std::chrono::system_clock> lastFrameTime;
+
+		void waitTillInterval(int milliseconds)
+		{
+			std::this_thread::sleep_until(lastFrameTime + std::chrono::milliseconds(milliseconds));
+		}
 
 		void createSyncObjects()
 		{
@@ -627,6 +707,15 @@ class Window
 
 		void endDraw()
 		{
+			if (imguiEnabled)
+			{
+				ImGui::Render();
+				ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), graphicsBuffer.buffer);
+				ImGui_ImplVulkan_NewFrame();
+				ImGui_ImplGlfw_NewFrame();
+				ImGui::NewFrame();
+			}
+
 			vkCmdEndRenderPass(graphicsBuffer.buffer);
 
 			VkSemaphore			 waitSemaphores[]	= {imageAvailableSemaphores};
@@ -648,6 +737,7 @@ class Window
 
 			presentInfo.pResults = nullptr; // optional
 
+		waitTillInterval(10);
 			VkResult result = vkQueuePresentKHR(graphicsQueue.queue, &presentInfo);
 
 			if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized)
@@ -659,6 +749,8 @@ class Window
 			{
 				throw std::runtime_error("failed to present swap chain image!");
 			}
+
+			lastFrameTime = std::chrono::system_clock::now();
 		}
 
 		void startDraw()
@@ -1029,85 +1121,6 @@ class Window
 		}
 };
 
-class DescriptorPool
-{
-	public:
-		VkDescriptorPool descriptorPool;
-		VkDevice		 device;
-
-		Descriptor createDescriptor(DescriptorLayout descriptorSetLayout, Buffer *buffer, Image *image,
-									Sampler *sampler)
-		{
-			Descriptor descriptor;
-
-			VkDescriptorSetAllocateInfo allocInfo{};
-			allocInfo.sType				 = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-			allocInfo.descriptorPool	 = descriptorPool;
-			allocInfo.descriptorSetCount = 1;
-			allocInfo.pSetLayouts		 = &descriptorSetLayout.layout;
-
-			if (vkAllocateDescriptorSets(device, &allocInfo, &descriptor.descriptorSets) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to allocate descriptor sets!");
-			}
-
-			VkWriteDescriptorSet descriptorWrite;
-			descriptorWrite.sType			= VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			descriptorWrite.dstSet			= descriptor.descriptorSets;
-			descriptorWrite.dstBinding		= descriptorSetLayout.binding;
-			descriptorWrite.dstArrayElement = 0;
-			descriptorWrite.descriptorCount = 1;
-			descriptorWrite.pNext			= nullptr;
-
-			VkDescriptorBufferInfo bufferInfo;
-			if (buffer != nullptr)
-			{
-				bufferInfo.buffer = buffer->buffer;
-				bufferInfo.range  = buffer->size;
-				bufferInfo.offset = 0;
-			}
-
-			VkDescriptorImageInfo imageInfo;
-			if (sampler != nullptr)
-			{
-				imageInfo.sampler = sampler->sampler;
-			}
-
-			if (image != nullptr)
-			{
-				imageInfo.imageView	  = image->view;
-				imageInfo.imageLayout = image->currentLayout;
-			}
-
-			descriptorWrite.descriptorType	 = (VkDescriptorType)descriptorSetLayout.type;
-			descriptorWrite.pBufferInfo		 = buffer != nullptr ? &bufferInfo : nullptr;
-			descriptorWrite.pImageInfo		 = image != nullptr ? &imageInfo : nullptr;
-			descriptorWrite.pTexelBufferView = nullptr;
-
-			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
-
-			return descriptor;
-		}
-
-		void reset()
-		{
-			vkResetDescriptorPool(device, descriptorPool, 0);
-		}
-};
-
-class UBO
-{
-	public:
-		Buffer	   buffer;
-		Descriptor descriptor;
-		void	  *map;
-
-		template <typename T> void update(T data)
-		{
-			memcpy(map, &data, sizeof(T));
-		}
-};
-
 class Dispatcher
 {
 	public:
@@ -1180,7 +1193,7 @@ class Instance
 			return dispatcher;
 		}
 
-		Window createWindow(int width, int height, std::string name)
+		Window createWindow(int width, int height, std::string name, bool enableImGUI = false)
 		{
 			Window window;
 
@@ -1203,6 +1216,33 @@ class Instance
 			window.graphicsPool	  = window.graphicsQueue.createCommandPool();
 			window.graphicsBuffer = window.graphicsPool.create();
 
+			if (enableImGUI)
+			{
+				window.imguiEnabled		   = true;
+				window.imguiDescriptorPool = createDescriptorPool(1000);
+
+				ImGui::CreateContext();
+				ImGuiIO &io = ImGui::GetIO();
+				ImGui_ImplGlfw_InitForVulkan(window.window, true);
+				ImGui_ImplVulkan_InitInfo init_info = {};
+				init_info.Instance					= instance;
+				init_info.PhysicalDevice			= physicalDevice;
+				init_info.Device					= device;
+				init_info.QueueFamily				= window.graphicsQueue.index;
+				init_info.Queue						= window.graphicsQueue.queue;
+				init_info.DescriptorPool			= window.imguiDescriptorPool.descriptorPool;
+				init_info.Subpass					= 0;
+				init_info.MinImageCount				= 2;
+				init_info.ImageCount				= 2;
+				init_info.MSAASamples				= VK_SAMPLE_COUNT_1_BIT;
+				init_info.RenderPass				= window.renderPass;
+				ImGui_ImplVulkan_Init(&init_info);
+				ImGui_ImplVulkan_CreateFontsTexture();
+
+				ImGui_ImplVulkan_NewFrame();
+				ImGui_ImplGlfw_NewFrame();
+				ImGui::NewFrame();
+			}
 			return window;
 		}
 
@@ -1796,42 +1836,38 @@ class Instance
 
 		DescriptorPool createDescriptorPool()
 		{
-			DescriptorPool pool;
-			pool.device = device;
-
-			VkDescriptorPoolSize poolSize[] = {
-				{.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 16},
-				{.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 16},
-				{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 16},
-			};
-
-			VkDescriptorPoolCreateInfo poolInfo{};
-			poolInfo.sType		   = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-			poolInfo.poolSizeCount = 3;
-			poolInfo.pPoolSizes	   = poolSize;
-
-			poolInfo.maxSets = 64;
-
-			if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool.descriptorPool) != VK_SUCCESS)
-			{
-				throw std::runtime_error("failed to create descriptor pool!");
-			}
-
-			return pool;
+			return createDescriptorPool(64);
 		}
 
 		DescriptorPool createDescriptorPool(ui32 max)
 		{
+			return createDescriptorPool(max, max, max, max, max, max, max, max, max, max, max, max);
+		}
+
+		DescriptorPool createDescriptorPool(ui32 max, ui32 samplerMax, ui32 combinedImageSamplerMax,
+											ui32 sampledImageMax, ui32 storageImageMax, ui32 uniformTexelBufferMax,
+											ui32 storageTexelBufferMax, ui32 uniformBufferMax, ui32 storageBufferMax,
+											ui32 uniformBufferDynamicMax, ui32 storageBufferDynamicMax,
+											ui32 inputAttachmentMax)
+		{
 			DescriptorPool pool;
 			pool.device = device;
 
-			VkDescriptorPoolSize poolSize[] = {
-				{.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = max},
-			};
+			VkDescriptorPoolSize poolSize[] = {{VK_DESCRIPTOR_TYPE_SAMPLER, samplerMax},
+											   {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, combinedImageSamplerMax},
+											   {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sampledImageMax},
+											   {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, storageImageMax},
+											   {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, uniformTexelBufferMax},
+											   {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, storageTexelBufferMax},
+											   {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniformBufferMax},
+											   {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, storageBufferMax},
+											   {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, uniformBufferDynamicMax},
+											   {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, storageBufferDynamicMax},
+											   {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, inputAttachmentMax}};
 
 			VkDescriptorPoolCreateInfo poolInfo{};
 			poolInfo.sType		   = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-			poolInfo.poolSizeCount = 3;
+			poolInfo.poolSizeCount = 11;
 			poolInfo.pPoolSizes	   = poolSize;
 
 			poolInfo.maxSets = max;
@@ -2039,12 +2075,6 @@ class Instance
 			stagingBuffer.destroy();
 
 			return image;
-		}
-
-		void destroyUBO(UBO &ubo)
-		{
-			ubo.buffer.unmap();
-			ubo.buffer.destroy();
 		}
 };
 
